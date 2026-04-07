@@ -1,0 +1,46 @@
+{
+  "baseSepolia": {
+    "network": "baseSepolia",
+    "chainId": 84532,
+    "deployer": "0x05a7Ae061c14847e0B70f7851d76FC10289d69b0",
+    "publisherRegistry": "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3",
+    "paymaster": "0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
+    "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "deployTxHash": "0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
+    "paymasterDeployTxHash": "0xceadc603b97d77fff05e1d0fcceb46df209ff89ca92464b786d40f5013e767bf",
+    "registerEndpointTxHash": "0x9fa5eb68c10d3448ac73b47313550f8ab9bbc468e1fdb29933537cf4041cd072",
+    "fundTxHash": "0xd0e45ca518ff9f74d7eb927a1684edfb85732b9dfaeb983e0c7bab03a9b83b4f",
+    "stakeTxHash": "0xb4920a49b48ac21188cfe4d2da66b7c59591f265576ed5d6bd84f5c5542b2733",
+    "weatherEndpoint": "https://agentgate.demo/api/weather",
+    "deployedAt": "2026-04-03T23:25:23.022Z",
+    "explorer": {
+      "publisherRegistry": "https://sepolia.basescan.org/address/0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3",
+      "paymaster": "https://sepolia.basescan.org/address/0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
+      "deployTx": "https://sepolia.basescan.org/tx/0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
+      "paymasterDeployTx": "https://sepolia.basescan.org/tx/0xf37a746f0abb8396d6b273de163509fd99562cc738d8133770490e62bc96baec",
+      "registerTx": "https://sepolia.basescan.org/tx/0x9fa5eb68c10d3448ac73b47313550f8ab9bbc468e1fdb29933537cf4041cd072",
+      "fundTx": "https://sepolia.basescan.org/tx/0x623b89b9a2fe91228f0b978b288e81e24f7da10c6bb222352a3f90265e659df4"
+    },
+    "sponsorTxHash": "0xebf1c897b0c335b76d1b7a44c47805d0a9503db7e71dfb6272b5a0810b8a0b17"
+  },
+  "hedera": {
+    "network": "hedera",
+    "chainId": 296,
+    "deployer": "0xD6E59890E7Dbf92262b15f7Ed39b38D1b755F33a",
+    "publisherRegistry": "0x33eb7BBCde3AD7851d331A946B666e2B257A5760",
+    "paymaster": "0x905C8365aC5d7059C0aa2f2007278C21A7192C1C",
+    "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "deployTxHash": "0x74f3c852836066b5194a11d2d4fca5ed808572e23c4a3da79776fe2fb1fe0a73",
+    "paymasterDeployTxHash": "0xd70355525d43fe7c60803196c511e4779af535dba86ce28bc150e32d0092bfe9",
+    "registerEndpointTxHash": "0xc9b78678e9a48d6b48a66b340dffcdfcf4822a8837940db05bdfe1e355689835",
+    "fundTxHash": "0xffb9bf2959306274a590216d9127bff1aa76d39d9de1847201a0511cc44029d6",
+    "weatherEndpoint": "https://agentgate.demo/api/weather",
+    "deployedAt": "2026-04-04T22:56:01.280Z",
+    "explorer": {
+      "publisherRegistry": "https://hashscan.io/testnet/contract/0x33eb7BBCde3AD7851d331A946B666e2B257A5760",
+      "paymaster": "https://hashscan.io/testnet/contract/0x905C8365aC5d7059C0aa2f2007278C21A7192C1C",
+      "deployTx": "https://hashscan.io/testnet/tx/0x74f3c852836066b5194a11d2d4fca5ed808572e23c4a3da79776fe2fb1fe0a73",
+      "registerTx": "https://hashscan.io/testnet/tx/0xc9b78678e9a48d6b48a66b340dffcdfcf4822a8837940db05bdfe1e355689835"
+    }
+  }
+}

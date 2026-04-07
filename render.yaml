@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: agentgate-server
+    runtime: node
+    rootDir: packages/server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HEDERA_TESTNET_RPC
+        value: https://testnet.hashio.io/api
+      - key: PUBLISHER_ADDRESS
+        value: 0xD6E59890E7Dbf92262b15f7Ed39b38D1b755F33a
+      - key: PRIVATE_KEY
+        sync: false

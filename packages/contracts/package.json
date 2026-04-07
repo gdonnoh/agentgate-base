@@ -1,0 +1,26 @@
+{
+  "name": "@agentgate/contracts",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:hedera": "hardhat run scripts/deploy.ts --network hedera",
+    "deploy:base": "hardhat run scripts/deploy.ts --network baseSepolia",
+    "fund": "hardhat run scripts/fund-paymaster.ts --network hedera",
+    "clean": "hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.0",
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.0.0"
+  },
+  "dependencies": {
+    "@account-abstraction/contracts": "^0.7.0",
+    "@openzeppelin/contracts": "^5.0.0",
+    "ethers": "^6.11.0",
+    "dotenv": "^16.4.0"
+  }
+}

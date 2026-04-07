@@ -1,0 +1,6 @@
+.env
+*.env.local
+node_modules
+dist
+packages/server/data/proxy-configs.json
+seed.js
