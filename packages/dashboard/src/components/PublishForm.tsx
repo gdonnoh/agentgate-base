@@ -424,8 +424,13 @@ export function PublishForm() {
       </div>
 
       {/* ── Gas Sponsorship ── */}
-      <div className="flex flex-col gap-2">
-        <label className="label">Gas Sponsorship</label>
+      <div className="flex flex-col gap-3">
+        <div>
+          <label className="label">Gas Sponsorship</label>
+          <p className="text-xs text-text-muted mt-1">
+            Agents prefer endpoints with free gas — it's like free shipping. Sponsor gas to get more traffic.
+          </p>
+        </div>
         <div className="flex items-center gap-3">
           <input
             type="number"
@@ -453,9 +458,22 @@ export function PublishForm() {
             </span>
           </div>
         </div>
+        <div className={`rounded-sm px-3 py-2 text-xs ${
+          gasSharePct === 100
+            ? "bg-success-dim border border-success/20 text-success"
+            : gasSharePct >= 50
+            ? "bg-accent-dim border border-accent/20 text-accent"
+            : gasSharePct > 0
+            ? "bg-warning/10 border border-warning/20 text-warning"
+            : "bg-error-dim border border-error/20 text-error"
+        }`}>
+          {gasSharePct === 100 && "Agents pay zero gas — maximum visibility. Your endpoint will be prioritized."}
+          {gasSharePct > 0 && gasSharePct < 100 && `You cover ${gasSharePct}% of gas. Good, but 100% gets the most agent traffic.`}
+          {gasSharePct === 0 && "No gas sponsorship — agents must pay their own gas. Most agents will skip your endpoint."}
+        </div>
         {estCalls > 0 && (
-          <p className="text-xs text-text-muted font-sans">
-            ~{estCalls.toLocaleString()} sponsored calls
+          <p className="text-xs text-text-muted font-mono">
+            Budget covers ~{estCalls.toLocaleString()} calls
           </p>
         )}
       </div>
