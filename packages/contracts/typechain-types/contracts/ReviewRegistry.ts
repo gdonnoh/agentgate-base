@@ -57,14 +57,23 @@ export interface ReviewRegistryInterface extends Interface {
       | "getEndpointReviews"
       | "getReviewCount"
       | "hasReviewed"
+      | "owner"
       | "publisherAvgRating"
       | "publisherReviewCount"
       | "publisherTotalScore"
       | "rate"
+      | "rateVerified"
+      | "renounceOwnership"
+      | "setTrustedRelayer"
+      | "transferOwnership"
+      | "trustedRelayer"
   ): FunctionFragment;
 
   getEvent(
-    nameOrSignatureOrTopic: "ReviewSubmitted" | "ReviewUpdated"
+    nameOrSignatureOrTopic:
+      | "OwnershipTransferred"
+      | "ReviewSubmitted"
+      | "ReviewUpdated"
   ): EventFragment;
 
   encodeFunctionData(
@@ -95,6 +104,7 @@ export interface ReviewRegistryInterface extends Interface {
     functionFragment: "hasReviewed",
     values: [BigNumberish, AddressLike]
   ): string;
+  encodeFunctionData(functionFragment: "owner", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "publisherAvgRating",
     values: [AddressLike]
@@ -110,6 +120,26 @@ export interface ReviewRegistryInterface extends Interface {
   encodeFunctionData(
     functionFragment: "rate",
     values: [BigNumberish, AddressLike, BigNumberish, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "rateVerified",
+    values: [AddressLike, BigNumberish, AddressLike, BigNumberish, BytesLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "renounceOwnership",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setTrustedRelayer",
+    values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "transferOwnership",
+    values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "trustedRelayer",
+    values?: undefined
   ): string;
 
   decodeFunctionResult(
@@ -140,6 +170,7 @@ export interface ReviewRegistryInterface extends Interface {
     functionFragment: "hasReviewed",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "publisherAvgRating",
     data: BytesLike
@@ -153,6 +184,39 @@ export interface ReviewRegistryInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "rate", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "rateVerified",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "renounceOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setTrustedRelayer",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "transferOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "trustedRelayer",
+    data: BytesLike
+  ): Result;
+}
+
+export namespace OwnershipTransferredEvent {
+  export type InputTuple = [previousOwner: AddressLike, newOwner: AddressLike];
+  export type OutputTuple = [previousOwner: string, newOwner: string];
+  export interface OutputObject {
+    previousOwner: string;
+    newOwner: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
 }
 
 export namespace ReviewSubmittedEvent {
@@ -301,6 +365,8 @@ export interface ReviewRegistry extends BaseContract {
     "view"
   >;
 
+  owner: TypedContractMethod<[], [string], "view">;
+
   publisherAvgRating: TypedContractMethod<
     [publisher: AddressLike],
     [bigint],
@@ -329,6 +395,34 @@ export interface ReviewRegistry extends BaseContract {
     [void],
     "nonpayable"
   >;
+
+  rateVerified: TypedContractMethod<
+    [
+      reviewer: AddressLike,
+      endpointId: BigNumberish,
+      publisher: AddressLike,
+      score: BigNumberish,
+      commentHash: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+
+  renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
+
+  setTrustedRelayer: TypedContractMethod<
+    [_relayer: AddressLike],
+    [void],
+    "nonpayable"
+  >;
+
+  transferOwnership: TypedContractMethod<
+    [newOwner: AddressLike],
+    [void],
+    "nonpayable"
+  >;
+
+  trustedRelayer: TypedContractMethod<[], [string], "view">;
 
   getFunction<T extends ContractMethod = ContractMethod>(
     key: string | FunctionFragment
@@ -376,6 +470,9 @@ export interface ReviewRegistry extends BaseContract {
     "view"
   >;
   getFunction(
+    nameOrSignature: "owner"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
     nameOrSignature: "publisherAvgRating"
   ): TypedContractMethod<[publisher: AddressLike], [bigint], "view">;
   getFunction(
@@ -396,7 +493,39 @@ export interface ReviewRegistry extends BaseContract {
     [void],
     "nonpayable"
   >;
+  getFunction(
+    nameOrSignature: "rateVerified"
+  ): TypedContractMethod<
+    [
+      reviewer: AddressLike,
+      endpointId: BigNumberish,
+      publisher: AddressLike,
+      score: BigNumberish,
+      commentHash: BytesLike
+    ],
+    [void],
+    "nonpayable"
+  >;
+  getFunction(
+    nameOrSignature: "renounceOwnership"
+  ): TypedContractMethod<[], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "setTrustedRelayer"
+  ): TypedContractMethod<[_relayer: AddressLike], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "transferOwnership"
+  ): TypedContractMethod<[newOwner: AddressLike], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "trustedRelayer"
+  ): TypedContractMethod<[], [string], "view">;
 
+  getEvent(
+    key: "OwnershipTransferred"
+  ): TypedContractEvent<
+    OwnershipTransferredEvent.InputTuple,
+    OwnershipTransferredEvent.OutputTuple,
+    OwnershipTransferredEvent.OutputObject
+  >;
   getEvent(
     key: "ReviewSubmitted"
   ): TypedContractEvent<
@@ -413,6 +542,17 @@ export interface ReviewRegistry extends BaseContract {
   >;
 
   filters: {
+    "OwnershipTransferred(address,address)": TypedContractEvent<
+      OwnershipTransferredEvent.InputTuple,
+      OwnershipTransferredEvent.OutputTuple,
+      OwnershipTransferredEvent.OutputObject
+    >;
+    OwnershipTransferred: TypedContractEvent<
+      OwnershipTransferredEvent.InputTuple,
+      OwnershipTransferredEvent.OutputTuple,
+      OwnershipTransferredEvent.OutputObject
+    >;
+
     "ReviewSubmitted(uint256,address,address,uint8,bytes32)": TypedContractEvent<
       ReviewSubmittedEvent.InputTuple,
       ReviewSubmittedEvent.OutputTuple,

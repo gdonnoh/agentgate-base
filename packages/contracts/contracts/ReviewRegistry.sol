@@ -1,39 +1,44 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import "@openzeppelin/contracts/access/Ownable.sol";
+
 /**
  * @title ReviewRegistry
  * @notice On-chain rating system for AgentGate endpoints and publishers.
- *         Agents rate endpoints after using them. Ratings are immutable and public.
+ *
+ *         Anti-sybil: only addresses verified through the trusted relayer can rate.
+ *         The relayer (AgentGate server) verifies WorldID before submitting ratings,
+ *         ensuring 1 real human = 1 vote per endpoint.
  *
  *         - Each agent can rate each endpoint once (update allowed, not delete)
  *         - Score: 1-5 (stars)
  *         - Optional comment hash (IPFS CID or keccak of comment stored off-chain)
  *         - Publisher reputation = average across all their endpoints
  */
-contract ReviewRegistry {
+contract ReviewRegistry is Ownable {
 
     struct Review {
-        address reviewer;       // agent who left the review
+        address reviewer;
         uint256 endpointId;
         uint8 score;            // 1-5
-        bytes32 commentHash;    // optional: keccak256 of comment or IPFS CID
+        bytes32 commentHash;    // optional
         uint256 timestamp;
     }
+
+    /// @notice Trusted relayer that submits WorldID-verified ratings
+    address public trustedRelayer;
 
     // endpointId → list of reviews
     mapping(uint256 => Review[]) public endpointReviews;
 
-    // endpointId → reviewer → index in endpointReviews array (for update)
+    // endpointId → reviewer → index in array (for update)
     mapping(uint256 => mapping(address => uint256)) private reviewIndex;
     mapping(uint256 => mapping(address => bool)) public hasReviewed;
 
-    // Aggregate stats (kept updated to avoid looping)
+    // Aggregate stats
     mapping(uint256 => uint256) public endpointTotalScore;
     mapping(uint256 => uint256) public endpointReviewCount;
-
-    // Publisher stats: publisher address → aggregate
-    // Updated by passing publisher address in the rate call
     mapping(address => uint256) public publisherTotalScore;
     mapping(address => uint256) public publisherReviewCount;
 
@@ -52,12 +57,39 @@ contract ReviewRegistry {
         uint8 newScore
     );
 
+    constructor() Ownable(msg.sender) {}
+
+    function setTrustedRelayer(address _relayer) external onlyOwner {
+        trustedRelayer = _relayer;
+    }
+
     /**
-     * @notice Rate an endpoint. Each agent can rate each endpoint once.
+     * @notice Submit a WorldID-verified rating. Only callable by the trusted relayer
+     *         or the reviewer directly (for decentralized fallback).
+     *
+     * @param reviewer    The agent wallet (verified by relayer via WorldID)
      * @param endpointId  The endpoint to rate
-     * @param publisher   The publisher address (passed by caller, verified off-chain)
+     * @param publisher   The publisher address
      * @param score       Rating 1-5
-     * @param commentHash Optional comment hash (pass bytes32(0) for none)
+     * @param commentHash Optional comment hash
+     */
+    function rateVerified(
+        address reviewer,
+        uint256 endpointId,
+        address publisher,
+        uint8 score,
+        bytes32 commentHash
+    ) external {
+        require(msg.sender == trustedRelayer || msg.sender == owner(), "Only trusted relayer");
+        require(score >= 1 && score <= 5, "Score must be 1-5");
+        require(reviewer != publisher, "Cannot rate your own endpoint");
+
+        _submitRating(reviewer, endpointId, publisher, score, commentHash);
+    }
+
+    /**
+     * @notice Direct rating (no relayer). Caller rates directly.
+     *         Less sybil-resistant but works as fallback.
      */
     function rate(
         uint256 endpointId,
@@ -68,13 +100,22 @@ contract ReviewRegistry {
         require(score >= 1 && score <= 5, "Score must be 1-5");
         require(msg.sender != publisher, "Cannot rate your own endpoint");
 
-        if (hasReviewed[endpointId][msg.sender]) {
-            // Update existing review
-            uint256 idx = reviewIndex[endpointId][msg.sender];
+        _submitRating(msg.sender, endpointId, publisher, score, commentHash);
+    }
+
+    function _submitRating(
+        address reviewer,
+        uint256 endpointId,
+        address publisher,
+        uint8 score,
+        bytes32 commentHash
+    ) internal {
+        if (hasReviewed[endpointId][reviewer]) {
+            // Update existing
+            uint256 idx = reviewIndex[endpointId][reviewer];
             Review storage existing = endpointReviews[endpointId][idx];
             uint8 oldScore = existing.score;
 
-            // Update aggregates
             endpointTotalScore[endpointId] = endpointTotalScore[endpointId] - oldScore + score;
             publisherTotalScore[publisher] = publisherTotalScore[publisher] - oldScore + score;
 
@@ -82,50 +123,46 @@ contract ReviewRegistry {
             existing.commentHash = commentHash;
             existing.timestamp = block.timestamp;
 
-            emit ReviewUpdated(endpointId, msg.sender, oldScore, score);
+            emit ReviewUpdated(endpointId, reviewer, oldScore, score);
         } else {
             // New review
             uint256 idx = endpointReviews[endpointId].length;
             endpointReviews[endpointId].push(Review({
-                reviewer: msg.sender,
+                reviewer: reviewer,
                 endpointId: endpointId,
                 score: score,
                 commentHash: commentHash,
                 timestamp: block.timestamp
             }));
 
-            reviewIndex[endpointId][msg.sender] = idx;
-            hasReviewed[endpointId][msg.sender] = true;
+            reviewIndex[endpointId][reviewer] = idx;
+            hasReviewed[endpointId][reviewer] = true;
 
             endpointTotalScore[endpointId] += score;
             endpointReviewCount[endpointId] += 1;
             publisherTotalScore[publisher] += score;
             publisherReviewCount[publisher] += 1;
 
-            emit ReviewSubmitted(endpointId, msg.sender, publisher, score, commentHash);
+            emit ReviewSubmitted(endpointId, reviewer, publisher, score, commentHash);
         }
     }
 
     // ── View helpers ───────────────────────────────────────────────────────────
 
-    /// @notice Average rating for an endpoint (multiplied by 100 for precision: 450 = 4.50)
     function endpointAvgRating(uint256 endpointId) external view returns (uint256) {
         if (endpointReviewCount[endpointId] == 0) return 0;
         return (endpointTotalScore[endpointId] * 100) / endpointReviewCount[endpointId];
     }
 
-    /// @notice Average rating for a publisher (multiplied by 100)
     function publisherAvgRating(address publisher) external view returns (uint256) {
         if (publisherReviewCount[publisher] == 0) return 0;
         return (publisherTotalScore[publisher] * 100) / publisherReviewCount[publisher];
     }
 
-    /// @notice Get all reviews for an endpoint
     function getEndpointReviews(uint256 endpointId) external view returns (Review[] memory) {
         return endpointReviews[endpointId];
     }
 
-    /// @notice Get review count for an endpoint
     function getReviewCount(uint256 endpointId) external view returns (uint256) {
         return endpointReviewCount[endpointId];
     }

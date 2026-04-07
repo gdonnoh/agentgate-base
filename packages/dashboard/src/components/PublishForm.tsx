@@ -384,7 +384,12 @@ export function PublishForm() {
 
       {/* ── Human Verification ── */}
       <div className="flex flex-col gap-1.5">
-        <label className="label">Human Verification</label>
+        <div>
+          <label className="label">Human Verification</label>
+          <p className="text-xs text-text-muted mt-1">
+            Recommended for paid APIs (OpenAI, Anthropic, etc.) — prevents bots from draining your API credits.
+          </p>
+        </div>
         <div className="flex flex-col gap-2">
           <button
             type="button"
@@ -399,8 +404,8 @@ export function PublishForm() {
               {!requireWorldId && <span className="w-2 h-2 rounded-full bg-accent" />}
             </span>
             <div>
-              <div className="text-sm font-medium text-text font-sans">Anyone can access</div>
-              <div className="text-xs text-text-muted font-sans mt-0.5">Pay USDC and use -- no identity proof needed</div>
+              <div className="text-sm font-medium text-text font-sans">Open access</div>
+              <div className="text-xs text-text-muted font-sans mt-0.5">Any agent can pay and use. Best for public content, articles, open data.</div>
             </div>
           </button>
           <button
@@ -416,8 +421,13 @@ export function PublishForm() {
               {requireWorldId && <span className="w-2 h-2 rounded-full bg-accent" />}
             </span>
             <div>
-              <div className="text-sm font-medium text-text font-sans">Verified humans only (WorldID)</div>
-              <div className="text-xs text-text-muted font-sans mt-0.5">3 free calls, then pay USDC</div>
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-text font-sans">Verified humans only</span>
+                <span className="badge-accent text-[10px]">Recommended for APIs</span>
+              </div>
+              <div className="text-xs text-text-muted font-sans mt-0.5">
+                Only WorldID-verified agents can access. Prevents bot abuse and protects your API key. Verified agents get 3 free calls.
+              </div>
             </div>
           </button>
         </div>

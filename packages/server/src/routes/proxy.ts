@@ -132,7 +132,7 @@ router.all("/:endpointId/*", async (c) => {
   // Use on-chain requireWorldId (falls back to proxyStore config)
   const requireWorldId = onChainRequireWorldId || proxyConfig.requireWorldId;
 
-  // 3. WorldID free-trial check (before payment)
+  // 3. WorldID verification + free-trial (only for endpoints that require WorldID)
   const agentkitHeader = c.req.header("agentkit") ?? c.req.header("AGENTKIT");
   let worldIdVerified = false;
   let worldIdAddress: string | undefined;
@@ -144,15 +144,17 @@ router.all("/:endpointId/*", async (c) => {
       worldIdAddress = akResult.address;
       console.log(`[proxy] ✅ WorldID verified: ${akResult.address} (humanId: ${akResult.humanId.slice(0, 10)}…)`);
 
-      // Free-trial: skip payment for verified agents
-      const trial = callTracker.checkFreeTrial(akResult.address!, endpointId);
-      if (trial.allowed) {
-        callTracker.consumeFreeTrial(akResult.address!, endpointId);
-        callTracker.record(endpointId, akResult.address!, true, 0, PLATFORM_FEE_PCT);
-        console.log(`[proxy] 🎟  Free-trial call ${trial.used + 1}/3 for ${akResult.address} on endpoint #${endpointId}`);
-        return await forwardToUpstream(c, proxyConfig, endpointId);
+      // Free-trial ONLY for WorldID-required endpoints (prevents sybil farming on open endpoints)
+      if (requireWorldId) {
+        const trial = callTracker.checkFreeTrial(akResult.address!, endpointId);
+        if (trial.allowed) {
+          callTracker.consumeFreeTrial(akResult.address!, endpointId);
+          callTracker.record(endpointId, akResult.address!, true, 0, PLATFORM_FEE_PCT);
+          console.log(`[proxy] 🎟  Free-trial call ${trial.used + 1}/3 for ${akResult.address} on endpoint #${endpointId}`);
+          return await forwardToUpstream(c, proxyConfig, endpointId);
+        }
+        console.log(`[proxy] Free-trial exhausted for ${akResult.address} on endpoint #${endpointId} — payment required`);
       }
-      console.log(`[proxy] Free-trial exhausted for ${akResult.address} on endpoint #${endpointId} — payment required`);
     } else if (akResult.valid && !akResult.humanId) {
       console.log(`[proxy] AgentKit valid but not in AgentBook: ${akResult.address} — not WorldID verified`);
     } else {

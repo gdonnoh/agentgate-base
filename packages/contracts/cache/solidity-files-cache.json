@@ -1966,8 +1966,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/PaymentSplitter.sol": {
-      "lastModificationDate": 1775510133053,
-      "contentHash": "30eb1c5d9c2669a2f35a34b9a1862fff",
+      "lastModificationDate": 1775548935720,
+      "contentHash": "56a8d46ecc222ea40a6219c4b3969913",
       "sourceName": "contracts/PaymentSplitter.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -2041,8 +2041,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/ReviewRegistry.sol": {
-      "lastModificationDate": 1775546765958,
-      "contentHash": "a1ae7bf324a1eaf7272ecead68a9d23c",
+      "lastModificationDate": 1775548895180,
+      "contentHash": "81bc2f5088f840b5ead6f8f7bddfc2d8",
       "sourceName": "contracts/ReviewRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -2068,7 +2068,9 @@
           }
         }
       },
-      "imports": [],
+      "imports": [
+        "@openzeppelin/contracts/access/Ownable.sol"
+      ],
       "versionPragmas": [
         "^0.8.24"
       ],

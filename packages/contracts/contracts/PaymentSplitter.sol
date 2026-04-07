@@ -53,10 +53,17 @@ contract PaymentSplitter is Ownable {
 
     /**
      * @notice Register the publisher wallet for an endpoint.
-     *         Only callable by owner (server/deployer sets this when endpoint is published).
+     *         Can be called by the owner OR by the publisher themselves.
+     *         Once set, only the current publisher or owner can change it.
      */
-    function registerPublisher(uint256 endpointId, address publisher) external onlyOwner {
+    function registerPublisher(uint256 endpointId, address publisher) external {
         require(publisher != address(0), "Invalid publisher");
+        address current = endpointPublisher[endpointId];
+        // First registration: anyone can set. After that: only current publisher or owner.
+        require(
+            current == address(0) || current == msg.sender || msg.sender == owner(),
+            "Not authorized to change publisher"
+        );
         endpointPublisher[endpointId] = publisher;
         emit PublisherRegistered(endpointId, publisher);
     }
