@@ -1,4 +1,5 @@
 services:
+  # Backend API server
   - type: web
     name: agentgate-server
     runtime: node
@@ -8,9 +9,28 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: HEDERA_TESTNET_RPC
-        value: https://testnet.hashio.io/api
+      - key: RPC_URL
+        value: https://sepolia.base.org
       - key: PUBLISHER_ADDRESS
-        value: 0xD6E59890E7Dbf92262b15f7Ed39b38D1b755F33a
+        value: 0x05a7Ae061c14847e0B70f7851d76FC10289d69b0
+      - key: PLATFORM_ADDRESS
+        value: 0x05a7Ae061c14847e0B70f7851d76FC10289d69b0
+      - key: POSTGRES_URL
+        sync: false
       - key: PRIVATE_KEY
         sync: false
+
+  # Frontend dashboard (static site)
+  - type: web
+    name: agentgate-dashboard
+    runtime: static
+    rootDir: packages/dashboard
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    headers:
+      - path: /*
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+    envVars:
+      - key: VITE_SERVER_URL
+        value: https://agentgate-server.onrender.com
