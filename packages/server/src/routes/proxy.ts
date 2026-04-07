@@ -168,10 +168,12 @@ router.all("/:endpointId/*", async (c) => {
   if (requireWorldId && !worldIdVerified) {
     const amount = usdToUsdcUnits(priceUsd);
     const paymentRequired: any = {
-      x402Version: 1,
+      x402Version: 2,
       accepts: [{
         scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET,
-        amount, asset: USDC_ADDRESS,
+        maxAmountRequired: amount, asset: USDC_ADDRESS,
+        extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
+        resource: c.req.url, description: proxyConfig.name, maxTimeoutSeconds: 60,
       }],
       requireWorldId: true,
       worldIdInfo: "This endpoint requires WorldID. Include a valid `agentkit` header. Verified agents get 3 free calls.",
@@ -189,10 +191,15 @@ router.all("/:endpointId/*", async (c) => {
       scheme:  "exact",
       network: "eip155:84532",
       payTo: PLATFORM_WALLET,
+      maxAmountRequired: amount,
       amount,
       asset:   USDC_ADDRESS,
+      extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
+      resource: c.req.url,
+      description: proxyConfig.name,
+      maxTimeoutSeconds: 60,
     }];
-    const paymentRequired: any = { x402Version: 1, accepts, endpointName: proxyConfig.name };
+    const paymentRequired: any = { x402Version: 2, accepts };
     if (requireWorldId) {
       paymentRequired.requireWorldId = true;
       paymentRequired.freeTrialInfo = "WorldID-verified agents get 3 free calls. Include `agentkit` header for free-trial.";
@@ -233,7 +240,7 @@ router.all("/:endpointId/*", async (c) => {
   }
 
   const amount         = usdToUsdcUnits(priceUsd);
-  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, amount, asset: USDC_ADDRESS, maxTimeoutSeconds: 60, extra: {} };
+  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: 60, resource: c.req.url };
   const verifyResult   = await facilitator.verify(paymentPayload, requirements as any);
 
   if (!verifyResult.isValid) {
