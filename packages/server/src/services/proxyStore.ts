@@ -2,10 +2,13 @@
  * proxyStore.ts
  *
  * Persistent store for proxy endpoint configurations.
- * Saves to a JSON file on every write — survives server restarts and redeploys.
  *
- * Security: only the endpoint's on-chain publisher can register a config,
- * verified via EIP-191 wallet signature before storing.
+ * Storage backends (in priority order):
+ *   1. PostgreSQL (Neon) — if POSTGRES_URL env var is set
+ *   2. Local JSON file  — fallback for local development
+ *
+ * Both backends expose the same interface. The DB backend persists
+ * across deploys and server restarts — no more lost configs.
  */
 
 import * as fs from "fs";
@@ -21,45 +24,14 @@ export interface ProxyConfig {
   registeredAt:    Date;
 }
 
-// Use /tmp on Vercel (read-only filesystem), project dir otherwise
-const DATA_DIR = process.env.VERCEL ? "/tmp" : path.resolve(__dirname, "../../data");
-const STORE_FILE = path.join(DATA_DIR, "proxy-configs.json");
-
-// Ensure data directory exists
-try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-
-// Load from disk on startup
-const store = new Map<number, ProxyConfig>();
-try {
-  if (fs.existsSync(STORE_FILE)) {
-    const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as ProxyConfig[];
-    for (const config of data) {
-      config.registeredAt = new Date(config.registeredAt);
-      store.set(config.endpointId, config);
-    }
-    console.log(`[proxyStore] Loaded ${store.size} configs from disk`);
-  }
-} catch (e: any) {
-  console.warn("[proxyStore] Could not load from disk:", e.message);
-}
-
-function saveToDisk() {
-  try {
-    const data = Array.from(store.values());
-    fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2));
-  } catch (e: any) {
-    console.warn("[proxyStore] Could not save to disk:", e.message);
-  }
-}
-
-// ── Call tracking (in-memory — resets on restart, that's OK) ────────────────
+// ── Call tracking (in-memory — resets on restart) ────────────────────────────
 interface CallRecord {
   agentAddress: string;
   timestamp:    number;
   freeTrial:    boolean;
-  priceUsd:     number;    // total price charged to agent
-  platformFee:  number;    // AgentGate's cut (USD)
-  publisherNet: number;    // publisher's net revenue (USD)
+  priceUsd:     number;
+  platformFee:  number;
+  publisherNet: number;
 }
 
 const endpointCalls = new Map<number, CallRecord[]>();
@@ -114,22 +86,136 @@ export const callTracker = {
   },
 };
 
+// ── Proxy Store (PostgreSQL or file-based) ──────────────────────────────────
+
+const POSTGRES_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+
+// In-memory cache (always used for fast reads)
+const cache = new Map<number, ProxyConfig>();
+
+// ── PostgreSQL backend ──────────────────────────────────────────────────────
+let pgPool: any = null;
+
+async function initPostgres() {
+  if (!POSTGRES_URL) return false;
+  try {
+    const { Pool } = await import("pg");
+    pgPool = new Pool({ connectionString: POSTGRES_URL, ssl: { rejectUnauthorized: false }, max: 5 });
+
+    // Create table if not exists
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS proxy_configs (
+        endpoint_id     INTEGER PRIMARY KEY,
+        name            TEXT NOT NULL DEFAULT '',
+        backend_url     TEXT NOT NULL,
+        inject_headers  JSONB NOT NULL DEFAULT '{}',
+        publisher_addr  TEXT NOT NULL,
+        require_world_id BOOLEAN NOT NULL DEFAULT FALSE,
+        registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    // Load all configs into cache
+    const { rows } = await pgPool.query("SELECT * FROM proxy_configs");
+    for (const row of rows) {
+      const config: ProxyConfig = {
+        endpointId:     row.endpoint_id,
+        name:           row.name,
+        backendUrl:     row.backend_url,
+        injectHeaders:  row.inject_headers,
+        publisherAddr:  row.publisher_addr,
+        requireWorldId: row.require_world_id,
+        registeredAt:   new Date(row.registered_at),
+      };
+      cache.set(config.endpointId, config);
+    }
+
+    console.log(`[proxyStore] PostgreSQL connected — loaded ${cache.size} configs`);
+    return true;
+  } catch (e: any) {
+    console.warn("[proxyStore] PostgreSQL failed, falling back to file:", e.message);
+    return false;
+  }
+}
+
+async function pgSet(config: ProxyConfig) {
+  if (!pgPool) return;
+  await pgPool.query(
+    `INSERT INTO proxy_configs (endpoint_id, name, backend_url, inject_headers, publisher_addr, require_world_id, registered_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (endpoint_id) DO UPDATE SET
+       name = $2, backend_url = $3, inject_headers = $4,
+       publisher_addr = $5, require_world_id = $6, registered_at = $7`,
+    [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
+     config.publisherAddr, config.requireWorldId, config.registeredAt]
+  );
+}
+
+async function pgDelete(endpointId: number) {
+  if (!pgPool) return;
+  await pgPool.query("DELETE FROM proxy_configs WHERE endpoint_id = $1", [endpointId]);
+}
+
+// ── File backend (local dev fallback) ───────────────────────────────────────
+const DATA_DIR = process.env.VERCEL ? "/tmp" : path.resolve(__dirname, "../../data");
+const STORE_FILE = path.join(DATA_DIR, "proxy-configs.json");
+
+function loadFromFile() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (fs.existsSync(STORE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as ProxyConfig[];
+      for (const config of data) {
+        config.registeredAt = new Date(config.registeredAt);
+        cache.set(config.endpointId, config);
+      }
+      console.log(`[proxyStore] File loaded — ${cache.size} configs`);
+    }
+  } catch (e: any) {
+    console.warn("[proxyStore] Could not load file:", e.message);
+  }
+}
+
+function saveToFile() {
+  try {
+    fs.writeFileSync(STORE_FILE, JSON.stringify(Array.from(cache.values()), null, 2));
+  } catch {}
+}
+
+// ── Initialize ──────────────────────────────────────────────────────────────
+let usePostgres = false;
+
+// Async init — called at import time
+(async () => {
+  usePostgres = await initPostgres();
+  if (!usePostgres) loadFromFile();
+})();
+
+// ── Public API ──────────────────────────────────────────────────────────────
 export const proxyStore = {
   set(config: ProxyConfig) {
-    store.set(config.endpointId, config);
-    saveToDisk();
+    cache.set(config.endpointId, config);
+    if (usePostgres) {
+      pgSet(config).catch(e => console.warn("[proxyStore] pgSet error:", e.message));
+    } else {
+      saveToFile();
+    }
   },
 
   get(endpointId: number): ProxyConfig | undefined {
-    return store.get(endpointId);
+    return cache.get(endpointId);
   },
 
   delete(endpointId: number) {
-    store.delete(endpointId);
-    saveToDisk();
+    cache.delete(endpointId);
+    if (usePostgres) {
+      pgDelete(endpointId).catch(e => console.warn("[proxyStore] pgDelete error:", e.message));
+    } else {
+      saveToFile();
+    }
   },
 
   all(): ProxyConfig[] {
-    return Array.from(store.values());
+    return Array.from(cache.values());
   },
 };

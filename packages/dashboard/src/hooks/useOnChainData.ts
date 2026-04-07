@@ -71,6 +71,7 @@ export function useOnChainData() {
           totalRevenue: (ep.totalRevenue / 1_000_000).toFixed(4),
           registeredAt: new Date(ep.registeredAt * 1000),
           requireWorldId: ep.requireWorldId,
+          proxyName: ep.name,
         }));
 
       setData({

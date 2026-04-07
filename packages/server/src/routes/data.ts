@@ -17,7 +17,7 @@ import {
   toBytes,
 } from "viem";
 import { baseSepolia } from "viem/chains";
-import { callTracker } from "../services/proxyStore";
+import { callTracker, proxyStore } from "../services/proxyStore";
 
 // ── Contract addresses ───────────────────────────────────────────────────────
 const REGISTRY_ADDR  = "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3" as const;
@@ -143,8 +143,10 @@ async function readEndpoint(id: number) {
     args: [BigInt(id)],
   })) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
 
+  const epId = Number(raw[0]);
+  const proxyConfig = proxyStore.get(epId);
   return {
-    id:              Number(raw[0]),
+    id: epId,
     publisher:       raw[1],
     url:             raw[2],
     pricePerCall:    Number(raw[3]),
@@ -154,6 +156,10 @@ async function readEndpoint(id: number) {
     totalRevenue:    Number(raw[7]),
     registeredAt:    Number(raw[8]),
     requireWorldId:  raw[9],
+    // Enriched from proxyStore
+    name:            proxyConfig?.name,
+    backendUrl:      proxyConfig?.backendUrl,
+    hasProxy:        !!proxyConfig,
   };
 }
 
