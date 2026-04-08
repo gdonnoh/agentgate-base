@@ -108,6 +108,11 @@ export function useWallet() {
         ...(value !== undefined ? { value } : {}),
       });
       const hash = await walletClient.writeContract({ ...request });
+      // Wait for the tx to be mined before returning, so the next simulateContract
+      // sees the resulting state (e.g. allowance after approve). Without this, a
+      // follow-up call like registerEndpoint reverts with "transfer amount exceeds
+      // allowance" because the approval hasn't landed on-chain yet.
+      await publicClient.waitForTransactionReceipt({ hash });
       return hash;
     },
     [state.address]
