@@ -212,6 +212,12 @@ router.all("/:endpointId/*", async (c) => {
     const accept = c.req.header("accept") || "";
     const isBrowser = c.req.method === "GET" && accept.includes("text/html");
     if (isBrowser) {
+      // Build absolute URL forcing https behind proxies (Render/Cloudflare)
+      const forwardedProto = c.req.header("x-forwarded-proto");
+      const host = c.req.header("host") || "localhost:4021";
+      const proto = forwardedProto || (host.includes("localhost") ? "http" : "https");
+      const absUrl = `${proto}://${host}${c.req.path}`;
+
       const html = paywallHtml({
         endpointId,
         endpointName: proxyConfig.name || `Endpoint #${endpointId}`,
@@ -220,7 +226,7 @@ router.all("/:endpointId/*", async (c) => {
         payTo: PLATFORM_WALLET,
         backendUrl: proxyConfig.backendUrl,
         requireWorldId,
-        proxyUrl: c.req.url,
+        proxyUrl: absUrl,
       });
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(html, 402);
