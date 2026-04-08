@@ -10,6 +10,8 @@ interface ProxyStats {
   freeTrialCalls: number;
   paidCalls: number;
   uniqueAgents: number;
+  totalRevenue: number;
+  publisherRevenue: number;
   requireWorldId: boolean;
 }
 
@@ -155,8 +157,11 @@ export function ManageEndpoint() {
   const gasSharePct = Math.round(newBps / 100);
   const topUpFloat = parseFloat(topUpAmt) || 0;
 
-  const totalRevenue = myEndpoints.reduce((s, e) => s + parseFloat(e.totalRevenue), 0);
-  const totalCalls = myEndpoints.reduce((s, e) => s + e.totalCalls, 0);
+  // Aggregate from proxyStats — the on-chain registry counters (e.totalCalls /
+  // e.totalRevenue) are never updated by the proxy x402 path, so they're
+  // always 0. proxyStats is the real source of truth for paid traffic.
+  const totalCalls = myEndpoints.reduce((s, e) => s + (e.proxyStats?.totalCalls ?? 0), 0);
+  const totalRevenue = myEndpoints.reduce((s, e) => s + (e.proxyStats?.totalRevenue ?? 0), 0);
 
   // ── Render: Not connected ─────────────────────────────────────────────────
 
@@ -273,8 +278,8 @@ export function ManageEndpoint() {
                 <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3">
                   {[
                     ["price", `$${ep.pricePerCall}/call`],
-                    ["calls", ep.totalCalls.toString()],
-                    ["revenue", `$${ep.totalRevenue}`],
+                    ["calls", (ep.proxyStats?.totalCalls ?? 0).toString()],
+                    ["revenue", `$${(ep.proxyStats?.totalRevenue ?? 0).toFixed(4)}`],
                     ["gas", ep.gasBudget !== "0" ? `${ep.gasBudget} ETH` : "---"],
                     ["sponsored", ep.gasSharePct > 0 ? `${ep.gasSharePct}%` : "---"],
                     ["since", ep.registeredAt.toLocaleDateString()],

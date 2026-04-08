@@ -16,6 +16,15 @@ export interface OnChainData {
   error: string | null;
 }
 
+export interface EndpointProxyStats {
+  totalCalls: number;
+  freeTrialCalls: number;
+  paidCalls: number;
+  uniqueAgents: number;
+  totalRevenue: number;
+  publisherRevenue: number;
+}
+
 export interface EndpointData {
   id: number;
   publisher: string;
@@ -29,6 +38,8 @@ export interface EndpointData {
   // Proxy metadata (fetched from server, not on-chain)
   proxyName?: string;
   requireWorldId?: boolean;
+  // Live proxy traffic stats (in-memory on the server, resets on restart)
+  proxyStats?: EndpointProxyStats;
 }
 
 const INITIAL: OnChainData = {
@@ -72,7 +83,16 @@ export function useOnChainData() {
           registeredAt: new Date(ep.registeredAt * 1000),
           requireWorldId: ep.requireWorldId,
           proxyName: ep.name,
+          proxyStats: ep.proxyStats,
         }));
+
+      // Aggregate "Total API Calls" from proxy stats — the on-chain paymaster
+      // counter (json.paymaster.totalCalls) only ticks for ERC-4337 UserOps,
+      // not for the x402 proxy path that publishers actually use.
+      const aggregateCalls = endpoints.reduce(
+        (s, e) => s + (e.proxyStats?.totalCalls ?? 0),
+        0,
+      );
 
       setData({
         deployerBalance:  parseFloat(json.deployer.balance).toFixed(4),
@@ -80,7 +100,7 @@ export function useOnChainData() {
         dailyBudget:      "—",
         dailySpent:       "—",
         remainingBudget:  "—",
-        totalCalls:       json.paymaster.totalCalls,
+        totalCalls:       aggregateCalls,
         totalSponsored:   parseFloat(json.paymaster.totalSponsored).toFixed(8),
         lastReset:        null,
         totalEndpoints:   endpoints.length,

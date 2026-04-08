@@ -145,6 +145,11 @@ async function readEndpoint(id: number) {
 
   const epId = Number(raw[0]);
   const proxyConfig = proxyStore.get(epId);
+  // Pull live proxy traffic stats from the in-memory tracker. The on-chain
+  // counters in raw[6]/raw[7] are written only by ERC-4337 paymaster flows;
+  // direct x402 proxy calls bypass them, so we surface the proxy counter
+  // alongside so the dashboard can aggregate real revenue.
+  const proxyStats = callTracker.getStats(epId);
   return {
     id: epId,
     publisher:       raw[1],
@@ -160,6 +165,8 @@ async function readEndpoint(id: number) {
     name:            proxyConfig?.name,
     backendUrl:      proxyConfig?.backendUrl,
     hasProxy:        !!proxyConfig,
+    // Enriched from in-memory call tracker (resets on server restart)
+    proxyStats,
   };
 }
 
@@ -317,13 +324,10 @@ dataRouter.get("/publisher/:address", async (c) => {
           }
         }
 
-        // Proxy call stats from in-memory tracker
-        const proxyStats = callTracker.getStats(id);
-
+        // proxyStats is already attached by readEndpoint().
         return {
           ...ep,
           paymaster: paymasterData,
-          proxyStats,
         };
       })
     );
@@ -378,12 +382,10 @@ dataRouter.get("/endpoint-by-url", async (c) => {
       console.warn(`[data/endpoint-by-url] Paymaster read failed:`, e.message);
     }
 
-    const proxyStats = callTracker.getStats(match.id);
-
+    // proxyStats is already attached by readEndpoint().
     return c.json({
       ...match,
       paymaster: paymasterData,
-      proxyStats,
     });
   } catch (err: any) {
     console.error("[data/endpoint-by-url] RPC error:", err.message);

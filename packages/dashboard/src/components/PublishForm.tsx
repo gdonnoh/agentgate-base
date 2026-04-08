@@ -210,11 +210,14 @@ export function PublishForm() {
       }
 
       const gasNum = parseDecimalInput(gasDeposit);
-      const totalSteps = (Number.isFinite(gasNum) && gasNum > 0 ? 1 : 0) + (backendUrl.trim() ? 1 : 0) + 1;
+      // Skip the deposit entirely if sponsorship is 0% — depositing ETH the
+      // paymaster will never spend on the publisher's behalf is wasted money.
+      const willDeposit = Number.isFinite(gasNum) && gasNum > 0 && gasSharePct > 0;
+      const totalSteps = (willDeposit ? 1 : 0) + (backendUrl.trim() ? 1 : 0) + 1;
       let step = 1;
 
       // Step 2 (optional): Fund gas budget on the Paymaster
-      if (Number.isFinite(gasNum) && gasNum > 0) {
+      if (willDeposit) {
         step++;
         setPublishStep(`${step}/${totalSteps} Depositing gas budget...`);
         const depositWei = BigInt(Math.round(gasNum * 1e18));
@@ -311,7 +314,8 @@ export function PublishForm() {
   const wrongNetwork = wallet.state.connected && wallet.state.chainId !== NETWORKS[selectedNet].chainId;
   const canPublish   = testResult?.ok && !publishing && !publishResult;
   const gasDepositNum = parseDecimalInput(gasDeposit);
-  const hasDeposit    = Number.isFinite(gasDepositNum) && gasDepositNum > 0;
+  // 0% sponsorship => no point depositing ETH (the paymaster covers nothing).
+  const hasDeposit    = Number.isFinite(gasDepositNum) && gasDepositNum > 0 && gasSharePct > 0;
 
   const GAS_PER_CALL   = 65_000n;
   const costPerCallWei = gasPrice * GAS_PER_CALL;
