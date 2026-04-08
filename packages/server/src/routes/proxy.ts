@@ -17,6 +17,7 @@ import { HTTPFacilitatorClient } from "@x402/core/http";
 import { proxyStore, callTracker } from "../services/proxyStore";
 import { validateAgentKitHeader } from "../services/agentkit";
 import { config, USDC_ADDRESS } from "../config";
+import { paywallHtml } from "../paywall";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3") as `0x${string}`;
@@ -206,6 +207,25 @@ router.all("/:endpointId/*", async (c) => {
     }
     const encoded = Buffer.from(JSON.stringify(paymentRequired)).toString("base64");
     c.header("PAYMENT-REQUIRED", encoded);
+
+    // Browser detection: if the request wants HTML, serve an interactive paywall page
+    const accept = c.req.header("accept") || "";
+    const isBrowser = c.req.method === "GET" && accept.includes("text/html");
+    if (isBrowser) {
+      const html = paywallHtml({
+        endpointId,
+        endpointName: proxyConfig.name || `Endpoint #${endpointId}`,
+        priceUsd,
+        usdcAmount: amount,
+        payTo: PLATFORM_WALLET,
+        backendUrl: proxyConfig.backendUrl,
+        requireWorldId,
+        proxyUrl: c.req.url,
+      });
+      c.header("Content-Type", "text/html; charset=utf-8");
+      return c.body(html, 402);
+    }
+
     c.header("Content-Type", "application/json");
     return c.json(paymentRequired, 402);
   }
