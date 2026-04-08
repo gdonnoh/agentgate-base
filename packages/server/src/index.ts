@@ -134,12 +134,23 @@ async function enrichAgentKit(c: any, next: () => Promise<void>) {
 const app = new Hono();
 
 // CORS — allow dashboard frontend (any origin for hackathon demo)
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, agentkit, AGENTKIT, payment-signature, PAYMENT-SIGNATURE, PAYMENT-REQUIRED, X-PAYMENT, x-payment-tx, x-payment-from",
+  "Access-Control-Max-Age": "86400",
+};
+
 app.use("*", async (c, next) => {
-  c.header("Access-Control-Allow-Origin", "*");
-  c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, agentkit, AGENTKIT, payment-signature, PAYMENT-SIGNATURE, PAYMENT-REQUIRED, X-PAYMENT");
-  if (c.req.method === "OPTIONS") return new Response(null, { status: 204 });
-  return next();
+  // Handle preflight BEFORE the route logic — return with CORS headers
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+  await next();
+  // Apply CORS headers to all responses
+  for (const [k, v] of Object.entries(CORS_HEADERS)) {
+    c.res.headers.set(k, v);
+  }
 });
 
 // On-chain data routes — public, no payment required

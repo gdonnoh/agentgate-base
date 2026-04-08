@@ -52,6 +52,7 @@ export function PublishForm() {
   const gasPrice = 100_000_000n;
 
   const [backendUrl,      setBackendUrl]      = useState("");
+  const [contentType,     setContentType]     = useState<"webpage" | "api">("webpage");
   const [headerRows,      setHeaderRows]      = useState<{key: string; val: string}[]>([{ key: "", val: "" }]);
   const [requireWorldId,  setRequireWorldId]  = useState(false);
   const [proxyDone,       setProxyDone]       = useState<string | null>(null);
@@ -239,8 +240,10 @@ export function PublishForm() {
         setPublishStep(`${step}/${totalSteps} Activating proxy...`);
         try {
           const injectHeaders: Record<string, string> = {};
-          for (const row of headerRows) {
-            if (row.key.trim()) injectHeaders[row.key.trim()] = row.val.trim();
+          if (contentType === "api") {
+            for (const row of headerRows) {
+              if (row.key.trim()) injectHeaders[row.key.trim()] = row.val.trim();
+            }
           }
           const timestamp = Date.now();
           const message   = `AgentGate proxy config\nendpointId: ${endpointId}\nbackendUrl: ${backendUrl.trim()}\ntimestamp: ${timestamp}`;
@@ -327,60 +330,105 @@ export function PublishForm() {
         </p>
       </div>
 
+      {/* ── Content type toggle ── */}
+      <div className="flex flex-col gap-1.5">
+        <label className="label">What are you protecting?</label>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setContentType("webpage")}
+            className={`card flex items-start gap-3 text-left cursor-pointer transition-colors ${
+              contentType === "webpage" ? "border-accent bg-accent-dim" : "hover:border-border-hover"
+            }`}
+          >
+            <span className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${
+              contentType === "webpage" ? "border-accent" : "border-border-hover"
+            }`}>
+              {contentType === "webpage" && <span className="w-2 h-2 rounded-full bg-accent" />}
+            </span>
+            <div>
+              <div className="text-sm font-medium text-text font-sans">Webpage</div>
+              <div className="text-xs text-text-muted font-sans mt-0.5">Blog, article, report, any public URL</div>
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setContentType("api")}
+            className={`card flex items-start gap-3 text-left cursor-pointer transition-colors ${
+              contentType === "api" ? "border-accent bg-accent-dim" : "hover:border-border-hover"
+            }`}
+          >
+            <span className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${
+              contentType === "api" ? "border-accent" : "border-border-hover"
+            }`}>
+              {contentType === "api" && <span className="w-2 h-2 rounded-full bg-accent" />}
+            </span>
+            <div>
+              <div className="text-sm font-medium text-text font-sans">API</div>
+              <div className="text-xs text-text-muted font-sans mt-0.5">OpenAI, Anthropic, your own API</div>
+            </div>
+          </button>
+        </div>
+      </div>
+
       {/* ── Backend URL ── */}
       <div className="flex flex-col gap-1.5">
-        <label className="label">Backend URL</label>
+        <label className="label">{contentType === "webpage" ? "Page URL" : "API Endpoint"}</label>
         <input
           type="url"
-          placeholder="https://api.openai.com/v1/chat/completions"
+          placeholder={contentType === "webpage"
+            ? "https://yourblog.com/article"
+            : "https://api.openai.com/v1/chat/completions"}
           value={backendUrl}
           onChange={(e) => setBackendUrl(e.target.value)}
           className="input"
         />
       </div>
 
-      {/* ── Auth Headers ── */}
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <label className="label">
-            Auth Headers
-            <span className="text-text-muted/50 normal-case tracking-normal ml-1.5">
-              optional — injected server-side, never exposed to agents
-            </span>
-          </label>
-          <button
-            onClick={() => setHeaderRows((r) => [...r, { key: "", val: "" }])}
-            className="text-xs text-text-muted hover:text-text-dim border border-border rounded-sm px-2 py-0.5 transition-colors"
-          >
-            + Add header
-          </button>
-        </div>
-        {headerRows.map((row, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <input
-              placeholder="Authorization"
-              value={row.key}
-              onChange={(e) => setHeaderRows((r) => r.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
-              className="input w-[35%] text-xs"
-            />
-            <span className="text-border text-sm">:</span>
-            <input
-              placeholder="Bearer sk-..."
-              value={row.val}
-              onChange={(e) => setHeaderRows((r) => r.map((x, j) => j === i ? { ...x, val: e.target.value } : x))}
-              className="input flex-1 text-xs"
-            />
-            {headerRows.length > 1 && (
-              <button
-                onClick={() => setHeaderRows((r) => r.filter((_, j) => j !== i))}
-                className="text-text-muted hover:text-error text-sm transition-colors"
-              >
-                x
-              </button>
-            )}
+      {/* ── Auth Headers (only for API mode) ── */}
+      {contentType === "api" && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <label className="label">
+              Auth Headers
+              <span className="text-text-muted/50 normal-case tracking-normal ml-1.5">
+                injected server-side, never exposed to agents
+              </span>
+            </label>
+            <button
+              onClick={() => setHeaderRows((r) => [...r, { key: "", val: "" }])}
+              className="text-xs text-text-muted hover:text-text-dim border border-border rounded-sm px-2 py-0.5 transition-colors"
+            >
+              + Add header
+            </button>
           </div>
-        ))}
-      </div>
+          {headerRows.map((row, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                placeholder="Authorization"
+                value={row.key}
+                onChange={(e) => setHeaderRows((r) => r.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
+                className="input w-[35%] text-xs"
+              />
+              <span className="text-border text-sm">:</span>
+              <input
+                placeholder="Bearer sk-..."
+                value={row.val}
+                onChange={(e) => setHeaderRows((r) => r.map((x, j) => j === i ? { ...x, val: e.target.value } : x))}
+                className="input flex-1 text-xs"
+              />
+              {headerRows.length > 1 && (
+                <button
+                  onClick={() => setHeaderRows((r) => r.filter((_, j) => j !== i))}
+                  className="text-text-muted hover:text-error text-sm transition-colors"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ── Price ── */}
       <div className="flex flex-col gap-1.5">
