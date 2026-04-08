@@ -225,8 +225,9 @@ router.all("/:endpointId/*", async (c) => {
       console.log(`[proxy] ✅ Browser payment verified for #${endpointId}: $${priceUsd} via tx ${browserTxHash.slice(0, 12)}… ($${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform)`);
       callTracker.record(endpointId, browserFrom, false, priceUsd, PLATFORM_FEE_PCT);
 
-      // Forward to backend
-      return await forwardToUpstream(c, proxyConfig, endpointId);
+      // Browser path: redirect directly to the original backend URL
+      // (so CSS/JS/images load from the original origin, not the proxy)
+      return c.json({ redirect: proxyConfig.backendUrl });
     } catch (err: any) {
       console.warn(`[proxy] Browser tx verification failed:`, err.message);
       return c.json({ error: `Payment verification failed: ${err.message}` }, 500);

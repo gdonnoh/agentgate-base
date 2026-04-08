@@ -309,20 +309,12 @@ export function paywallHtml(opts: PaywallOptions): string {
       });
 
       if (res2.status === 200) {
-        showStatus("Payment confirmed! Loading content...", "success");
-        const content = await res2.text();
-        const contentType = res2.headers.get("content-type") || "text/html";
-
-        if (contentType.includes("html")) {
-          // Replace the whole page with the content
-          document.open();
-          document.write(content);
-          document.close();
-        } else if (contentType.includes("json")) {
-          document.body.innerHTML = '<pre style="padding:20px;background:#111;color:#e5e7eb;border-radius:8px;overflow:auto;max-width:800px;margin:40px auto;font-family:JetBrains Mono,monospace;font-size:13px">' +
-            escapeHtml(JSON.stringify(JSON.parse(content), null, 2)) + '</pre>';
+        const data = await res2.json();
+        if (data.redirect) {
+          showStatus("Payment confirmed! Redirecting to content...", "success");
+          setTimeout(() => { window.location.href = data.redirect; }, 800);
         } else {
-          document.body.innerHTML = '<pre style="padding:20px;max-width:800px;margin:40px auto">' + escapeHtml(content) + '</pre>';
+          showStatus("Payment confirmed!", "success");
         }
       } else {
         const err = await res2.text();
