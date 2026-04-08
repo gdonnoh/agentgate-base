@@ -24,6 +24,9 @@ const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0x9Aa0797C0F5b4f72fD7a92
 const PLATFORM_WALLET = config.platformAddress as `0x${string}`;
 const PLATFORM_FEE_PCT = config.platformFeePct;
 
+// Replay protection for browser direct-transfer payments
+const usedBrowserTxHashes = new Set<string>();
+
 const baseSepoliaChain = defineChain({
   id: 84532, name: "Base Sepolia",
   nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
@@ -181,6 +184,53 @@ router.all("/:endpointId/*", async (c) => {
     };
     c.header("PAYMENT-REQUIRED", Buffer.from(JSON.stringify(paymentRequired)).toString("base64"));
     return c.json(paymentRequired, 402);
+  }
+
+  // 3b. Browser direct-transfer payment verification (simpler than x402 for paywall page)
+  const browserTxHash = c.req.header("x-payment-tx");
+  const browserFrom = c.req.header("x-payment-from");
+  if (browserTxHash && browserFrom) {
+    try {
+      const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
+      const receipt = await client.getTransactionReceipt({ hash: browserTxHash as `0x${string}` });
+
+      if (receipt.status !== "success") {
+        return c.json({ error: "Payment transaction failed on-chain" }, 402);
+      }
+
+      // Parse USDC Transfer event: Transfer(from, to, amount)
+      const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+      const requiredAmount = BigInt(usdToUsdcUnits(priceUsd));
+      const found = receipt.logs.find((log: any) => {
+        if (log.address.toLowerCase() !== USDC_ADDRESS.toLowerCase()) return false;
+        if (log.topics[0] !== TRANSFER_TOPIC) return false;
+        const from = "0x" + log.topics[1].slice(26).toLowerCase();
+        const to = "0x" + log.topics[2].slice(26).toLowerCase();
+        const amount = BigInt(log.data);
+        return from === browserFrom.toLowerCase() && to === PLATFORM_WALLET.toLowerCase() && amount >= requiredAmount;
+      });
+
+      if (!found) {
+        return c.json({ error: "Payment tx does not contain matching USDC transfer" }, 402);
+      }
+
+      // Replay protection: check we haven't processed this tx before
+      if (usedBrowserTxHashes.has(browserTxHash)) {
+        return c.json({ error: "Payment tx already used" }, 402);
+      }
+      usedBrowserTxHashes.add(browserTxHash);
+
+      const platformFee = priceUsd * (PLATFORM_FEE_PCT / 100);
+      const publisherNet = priceUsd - platformFee;
+      console.log(`[proxy] ✅ Browser payment verified for #${endpointId}: $${priceUsd} via tx ${browserTxHash.slice(0, 12)}… ($${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform)`);
+      callTracker.record(endpointId, browserFrom, false, priceUsd, PLATFORM_FEE_PCT);
+
+      // Forward to backend
+      return await forwardToUpstream(c, proxyConfig, endpointId);
+    } catch (err: any) {
+      console.warn(`[proxy] Browser tx verification failed:`, err.message);
+      return c.json({ error: `Payment verification failed: ${err.message}` }, 500);
+    }
   }
 
   // 4. Check for payment

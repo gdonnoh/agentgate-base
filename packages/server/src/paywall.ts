@@ -286,101 +286,26 @@ export function paywallHtml(opts: PaywallOptions): string {
         return;
       }
 
-      // 2. Check Permit2 allowance
-      showStatus("Checking allowance...", "info");
-      const allowance = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "allowance", type: "function", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }],
-        functionName: "allowance",
-        args: [userAddress, PERMIT2_ADDRESS],
-      });
-      if (allowance < USDC_AMOUNT) {
-        showStatus("Approve Permit2 to spend USDC (one-time)...", "info");
-        const tx = await walletClient.writeContract({
-          account: userAddress,
-          address: USDC_ADDRESS,
-          abi: [{ name: "approve", type: "function", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" }],
-          functionName: "approve",
-          args: [PERMIT2_ADDRESS, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")],
-        });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
-      }
-
-      // 3. Fetch 402 challenge, sign permit2, send payment
-      showStatus("Fetching payment challenge...", "info");
-      const res1 = await fetch(PROXY_URL, { headers: { "accept": "application/json" } });
-      const payReqHeader = res1.headers.get("payment-required");
-      const challenge = JSON.parse(atob(payReqHeader));
-      const req = challenge.accepts[0];
-
-      // Build Permit2 authorization
-      showStatus("Sign payment in your wallet...", "info");
-      const now = Math.floor(Date.now() / 1000);
-      const nonce = BigInt("0x" + Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2, "0")).join(""));
-      const deadline = BigInt(now + 60);
-      const validAfter = BigInt(now - 600);
-
-      const domain = { name: "Permit2", chainId: 84532, verifyingContract: PERMIT2_ADDRESS };
-      const types = {
-        PermitWitnessTransferFrom: [
-          { name: "permitted", type: "TokenPermissions" },
-          { name: "spender", type: "address" },
-          { name: "nonce", type: "uint256" },
-          { name: "deadline", type: "uint256" },
-          { name: "witness", type: "Witness" },
-        ],
-        TokenPermissions: [
-          { name: "token", type: "address" },
-          { name: "amount", type: "uint256" },
-        ],
-        Witness: [
-          { name: "to", type: "address" },
-          { name: "validAfter", type: "uint256" },
-        ],
-      };
-
-      // The spender is the x402 facilitator proxy address — we need to get it
-      // For now, use a known x402 proxy or the payTo
-      const spender = getAddress(PAYTO); // fallback
-
-      const message = {
-        permitted: { token: getAddress(USDC_ADDRESS), amount: USDC_AMOUNT },
-        spender,
-        nonce,
-        deadline,
-        witness: { to: getAddress(PAYTO), validAfter },
-      };
-
-      const signature = await walletClient.signTypedData({
+      // 2. Direct USDC transfer from user to platform wallet
+      showStatus("Sign USDC transfer in your wallet...", "info");
+      const txHash = await walletClient.writeContract({
         account: userAddress,
-        domain,
-        types,
-        primaryType: "PermitWitnessTransferFrom",
-        message,
+        address: USDC_ADDRESS,
+        abi: [{ name: "transfer", type: "function", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" }],
+        functionName: "transfer",
+        args: [getAddress(PAYTO), USDC_AMOUNT],
       });
+      showStatus("Waiting for confirmation...", "info");
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-      // 4. Build payment payload and retry
-      showStatus("Verifying payment...", "info");
-      const paymentPayload = {
-        x402Version: 2,
-        scheme: "exact",
-        network: "eip155:84532",
-        payload: {
-          signature,
-          permit2Authorization: {
-            from: userAddress,
-            permitted: { token: USDC_ADDRESS, amount: USDC_AMOUNT.toString() },
-            spender,
-            nonce: nonce.toString(),
-            deadline: deadline.toString(),
-            witness: { to: PAYTO, validAfter: validAfter.toString() },
-          },
-        },
-      };
-
-      const encoded = btoa(JSON.stringify(paymentPayload, (_, v) => typeof v === "bigint" ? v.toString() : v));
+      // 3. Retry endpoint with the tx hash as payment proof
+      showStatus("Payment confirmed. Loading content...", "info");
       const res2 = await fetch(PROXY_URL, {
-        headers: { "payment-signature": encoded, "accept": "text/html" },
+        headers: {
+          "x-payment-tx": txHash,
+          "x-payment-from": userAddress,
+          "accept": "text/html",
+        },
       });
 
       if (res2.status === 200) {
