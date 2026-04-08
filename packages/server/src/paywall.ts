@@ -184,6 +184,123 @@ export function paywallHtml(opts: PaywallOptions): string {
     border-radius: 3px;
     color: var(--text-dim);
   }
+
+  /* ── Step animation ─────────────────────────────────────── */
+  .steps {
+    display: none;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 20px;
+    padding: 20px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .steps.show { display: flex; }
+
+  .step {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    opacity: 0.35;
+    transition: opacity 0.4s ease;
+  }
+  .step.active { opacity: 1; }
+  .step.done { opacity: 0.8; }
+
+  .step-icon {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-hover);
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    transition: all 0.3s ease;
+    position: relative;
+  }
+  .step.active .step-icon {
+    border-color: var(--accent);
+    background: rgba(59, 130, 246, 0.1);
+    color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+  }
+  .step.done .step-icon {
+    border-color: var(--success);
+    background: var(--success);
+    color: white;
+  }
+  .step.done .step-icon::before {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 5px;
+    border-left: 2px solid white;
+    border-bottom: 2px solid white;
+    transform: rotate(-45deg) translate(1px, -1px);
+  }
+  .step.done .step-icon > span { display: none; }
+  .step.active .step-icon > span::after {
+    content: "";
+    display: block;
+    width: 8px;
+    height: 8px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  .step.active .step-icon > span { color: transparent; }
+
+  .step-content { flex: 1; min-width: 0; }
+  .step-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 2px;
+  }
+  .step-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .step-link {
+    display: inline-block;
+    margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: var(--accent);
+    text-decoration: none;
+    word-break: break-all;
+  }
+  .step-link:hover { text-decoration: underline; }
+
+  /* Connector line between steps */
+  .step:not(:last-child) {
+    position: relative;
+  }
+  .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: 10.5px;
+    top: 28px;
+    bottom: -14px;
+    width: 1px;
+    background: var(--border);
+  }
+  .step.done:not(:last-child)::after {
+    background: var(--success);
+  }
 </style>
 </head>
 <body>
@@ -209,6 +326,45 @@ export function paywallHtml(opts: PaywallOptions): string {
   <button id="payBtn" class="secondary" style="display:none; margin-top:8px;">Pay $${opts.priceUsd.toFixed(2)} & Access</button>
 
   <div id="status" class="status"></div>
+
+  <div id="steps" class="steps">
+    <div class="step" data-step="1">
+      <div class="step-icon"><span>1</span></div>
+      <div class="step-content">
+        <div class="step-title">Sign USDC transfer</div>
+        <div class="step-desc">Approve the payment in your wallet</div>
+      </div>
+    </div>
+    <div class="step" data-step="2">
+      <div class="step-icon"><span>2</span></div>
+      <div class="step-content">
+        <div class="step-title">Broadcast to Base Sepolia</div>
+        <div class="step-desc">Transaction submitted to the blockchain</div>
+        <a id="txLink" class="step-link" href="" target="_blank"></a>
+      </div>
+    </div>
+    <div class="step" data-step="3">
+      <div class="step-icon"><span>3</span></div>
+      <div class="step-content">
+        <div class="step-title">Wait for confirmation</div>
+        <div class="step-desc">~2 seconds on Base Sepolia</div>
+      </div>
+    </div>
+    <div class="step" data-step="4">
+      <div class="step-icon"><span>4</span></div>
+      <div class="step-content">
+        <div class="step-title">Server verifies on-chain</div>
+        <div class="step-desc">x402 gateway checks the Transfer event</div>
+      </div>
+    </div>
+    <div class="step" data-step="5">
+      <div class="step-icon"><span>5</span></div>
+      <div class="step-content">
+        <div class="step-title">Access granted</div>
+        <div class="step-desc">Redirecting you to the content</div>
+      </div>
+    </div>
+  </div>
 
   <div class="footer">
     Powered by <a href="https://github.com/gdonnoh/agentgate-base" target="_blank">AgentGate</a> · x402 Protocol
@@ -268,12 +424,21 @@ export function paywallHtml(opts: PaywallOptions): string {
     }
   };
 
+  const stepsEl = document.getElementById("steps");
+  function setStep(n, state) {
+    const el = stepsEl.querySelector(\`[data-step="\${n}"]\`);
+    if (!el) return;
+    el.classList.remove("active", "done");
+    if (state) el.classList.add(state);
+  }
+  function completeStep(n) { setStep(n, "done"); }
+  function activateStep(n) { setStep(n, "active"); }
+
   payBtn.onclick = async () => {
     try {
       payBtn.disabled = true;
 
-      // 1. Check USDC balance
-      showStatus("Checking balance...", "info");
+      // Pre-check balance (silent)
       const balance = await publicClient.readContract({
         address: USDC_ADDRESS,
         abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }],
@@ -286,8 +451,14 @@ export function paywallHtml(opts: PaywallOptions): string {
         return;
       }
 
-      // 2. Direct USDC transfer from user to platform wallet
-      showStatus("Sign USDC transfer in your wallet...", "info");
+      // Hide buttons, show animated steps
+      connectBtn.style.display = "none";
+      payBtn.style.display = "none";
+      stepsEl.classList.add("show");
+      hideStatus();
+
+      // Step 1: Sign USDC transfer
+      activateStep(1);
       const txHash = await walletClient.writeContract({
         account: userAddress,
         address: USDC_ADDRESS,
@@ -295,11 +466,23 @@ export function paywallHtml(opts: PaywallOptions): string {
         functionName: "transfer",
         args: [getAddress(PAYTO), USDC_AMOUNT],
       });
-      showStatus("Waiting for confirmation...", "info");
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      completeStep(1);
 
-      // 3. Retry endpoint with the tx hash as payment proof
-      showStatus("Payment confirmed. Loading content...", "info");
+      // Step 2: Broadcast
+      activateStep(2);
+      const txLink = document.getElementById("txLink");
+      txLink.href = \`https://sepolia.basescan.org/tx/\${txHash}\`;
+      txLink.textContent = \`\${txHash.slice(0, 10)}...\${txHash.slice(-8)} ↗\`;
+      await new Promise(r => setTimeout(r, 400));
+      completeStep(2);
+
+      // Step 3: Wait for confirmation
+      activateStep(3);
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      completeStep(3);
+
+      // Step 4: Server verifies
+      activateStep(4);
       const res2 = await fetch(PROXY_URL, {
         headers: {
           "x-payment-tx": txHash,
@@ -308,22 +491,32 @@ export function paywallHtml(opts: PaywallOptions): string {
         },
       });
 
-      if (res2.status === 200) {
-        const data = await res2.json();
-        if (data.redirect) {
-          showStatus("Payment confirmed! Redirecting to content...", "success");
-          setTimeout(() => { window.location.href = data.redirect; }, 800);
-        } else {
-          showStatus("Payment confirmed!", "success");
-        }
-      } else {
+      if (res2.status !== 200) {
         const err = await res2.text();
         showStatus("Payment rejected: " + err, "error");
         payBtn.disabled = false;
+        payBtn.style.display = "block";
+        stepsEl.classList.remove("show");
+        return;
+      }
+      completeStep(4);
+
+      // Step 5: Redirect
+      activateStep(5);
+      const data = await res2.json();
+      if (data.redirect) {
+        await new Promise(r => setTimeout(r, 600));
+        completeStep(5);
+        await new Promise(r => setTimeout(r, 500));
+        window.location.href = data.redirect;
+      } else {
+        completeStep(5);
       }
     } catch (e) {
       showStatus((e.shortMessage || e.message || "Error"), "error");
       payBtn.disabled = false;
+      payBtn.style.display = "block";
+      stepsEl.classList.remove("show");
     }
   };
 
