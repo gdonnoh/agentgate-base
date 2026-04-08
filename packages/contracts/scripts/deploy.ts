@@ -54,8 +54,16 @@ async function main() {
 
   // ── 1. Deploy PublisherRegistry ──────────────────────────────────────────
   console.log("\n📝 [1/4] Deploying PublisherRegistry...");
+  // Base Sepolia USDC, deployer as platform wallet, 1 USDC publishing fee (1_000_000 = 1 USDC with 6 decimals)
+  const USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+  const PUBLISHING_FEE = 1_000_000n;
   const RegistryFactory = await ethers.getContractFactory("PublisherRegistry");
-  const registry = await RegistryFactory.deploy({ gasLimit: 6_000_000 });
+  const registry = await RegistryFactory.deploy(
+    USDC_BASE_SEPOLIA,
+    deployer.address,
+    PUBLISHING_FEE,
+    { gasLimit: 6_000_000 }
+  );
   await registry.waitForDeployment();
 
   const registryAddress = await registry.getAddress();

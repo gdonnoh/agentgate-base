@@ -74,15 +74,20 @@ export interface PublisherRegistryInterface extends Interface {
       | "isSponsored"
       | "nextEndpointId"
       | "owner"
+      | "platformWallet"
       | "publisherEndpoints"
+      | "publishingFee"
       | "recordCall"
       | "registerEndpoint"
       | "renounceOwnership"
+      | "setPlatformWallet"
+      | "setPublishingFee"
       | "setRequireWorldId"
       | "setTrustedCaller"
       | "transferOwnership"
       | "trustedCaller"
       | "updatePaymaster"
+      | "usdc"
   ): FunctionFragment;
 
   getEvent(
@@ -93,6 +98,9 @@ export interface PublisherRegistryInterface extends Interface {
       | "EndpointRegistered"
       | "OwnershipTransferred"
       | "PaymasterUpdated"
+      | "PlatformWalletUpdated"
+      | "PublishingFeePaid"
+      | "PublishingFeeUpdated"
       | "WorldIdRequirementSet"
   ): EventFragment;
 
@@ -130,8 +138,16 @@ export interface PublisherRegistryInterface extends Interface {
   ): string;
   encodeFunctionData(functionFragment: "owner", values?: undefined): string;
   encodeFunctionData(
+    functionFragment: "platformWallet",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
     functionFragment: "publisherEndpoints",
     values: [AddressLike, BigNumberish]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "publishingFee",
+    values?: undefined
   ): string;
   encodeFunctionData(
     functionFragment: "recordCall",
@@ -144,6 +160,14 @@ export interface PublisherRegistryInterface extends Interface {
   encodeFunctionData(
     functionFragment: "renounceOwnership",
     values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setPlatformWallet",
+    values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setPublishingFee",
+    values: [BigNumberish]
   ): string;
   encodeFunctionData(
     functionFragment: "setRequireWorldId",
@@ -165,6 +189,7 @@ export interface PublisherRegistryInterface extends Interface {
     functionFragment: "updatePaymaster",
     values: [BigNumberish, AddressLike]
   ): string;
+  encodeFunctionData(functionFragment: "usdc", values?: undefined): string;
 
   decodeFunctionResult(
     functionFragment: "activateEndpoint",
@@ -197,7 +222,15 @@ export interface PublisherRegistryInterface extends Interface {
   ): Result;
   decodeFunctionResult(functionFragment: "owner", data: BytesLike): Result;
   decodeFunctionResult(
+    functionFragment: "platformWallet",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
     functionFragment: "publisherEndpoints",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "publishingFee",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "recordCall", data: BytesLike): Result;
@@ -207,6 +240,14 @@ export interface PublisherRegistryInterface extends Interface {
   ): Result;
   decodeFunctionResult(
     functionFragment: "renounceOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setPlatformWallet",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setPublishingFee",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -229,6 +270,7 @@ export interface PublisherRegistryInterface extends Interface {
     functionFragment: "updatePaymaster",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(functionFragment: "usdc", data: BytesLike): Result;
 }
 
 export namespace CallRecordedEvent {
@@ -322,6 +364,50 @@ export namespace PaymasterUpdatedEvent {
   export interface OutputObject {
     id: bigint;
     paymasterAddress: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace PlatformWalletUpdatedEvent {
+  export type InputTuple = [oldWallet: AddressLike, newWallet: AddressLike];
+  export type OutputTuple = [oldWallet: string, newWallet: string];
+  export interface OutputObject {
+    oldWallet: string;
+    newWallet: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace PublishingFeePaidEvent {
+  export type InputTuple = [
+    id: BigNumberish,
+    publisher: AddressLike,
+    amount: BigNumberish
+  ];
+  export type OutputTuple = [id: bigint, publisher: string, amount: bigint];
+  export interface OutputObject {
+    id: bigint;
+    publisher: string;
+    amount: bigint;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
+export namespace PublishingFeeUpdatedEvent {
+  export type InputTuple = [oldFee: BigNumberish, newFee: BigNumberish];
+  export type OutputTuple = [oldFee: bigint, newFee: bigint];
+  export interface OutputObject {
+    oldFee: bigint;
+    newFee: bigint;
   }
   export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
   export type Filter = TypedDeferredTopicFilter<Event>;
@@ -451,11 +537,15 @@ export interface PublisherRegistry extends BaseContract {
 
   owner: TypedContractMethod<[], [string], "view">;
 
+  platformWallet: TypedContractMethod<[], [string], "view">;
+
   publisherEndpoints: TypedContractMethod<
     [arg0: AddressLike, arg1: BigNumberish],
     [bigint],
     "view"
   >;
+
+  publishingFee: TypedContractMethod<[], [bigint], "view">;
 
   recordCall: TypedContractMethod<
     [endpointId: BigNumberish],
@@ -470,6 +560,18 @@ export interface PublisherRegistry extends BaseContract {
   >;
 
   renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
+
+  setPlatformWallet: TypedContractMethod<
+    [newWallet: AddressLike],
+    [void],
+    "nonpayable"
+  >;
+
+  setPublishingFee: TypedContractMethod<
+    [newFee: BigNumberish],
+    [void],
+    "nonpayable"
+  >;
 
   setRequireWorldId: TypedContractMethod<
     [endpointId: BigNumberish, required: boolean],
@@ -496,6 +598,8 @@ export interface PublisherRegistry extends BaseContract {
     [void],
     "nonpayable"
   >;
+
+  usdc: TypedContractMethod<[], [string], "view">;
 
   getFunction<T extends ContractMethod = ContractMethod>(
     key: string | FunctionFragment
@@ -561,12 +665,18 @@ export interface PublisherRegistry extends BaseContract {
     nameOrSignature: "owner"
   ): TypedContractMethod<[], [string], "view">;
   getFunction(
+    nameOrSignature: "platformWallet"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
     nameOrSignature: "publisherEndpoints"
   ): TypedContractMethod<
     [arg0: AddressLike, arg1: BigNumberish],
     [bigint],
     "view"
   >;
+  getFunction(
+    nameOrSignature: "publishingFee"
+  ): TypedContractMethod<[], [bigint], "view">;
   getFunction(
     nameOrSignature: "recordCall"
   ): TypedContractMethod<[endpointId: BigNumberish], [void], "nonpayable">;
@@ -580,6 +690,12 @@ export interface PublisherRegistry extends BaseContract {
   getFunction(
     nameOrSignature: "renounceOwnership"
   ): TypedContractMethod<[], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "setPlatformWallet"
+  ): TypedContractMethod<[newWallet: AddressLike], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "setPublishingFee"
+  ): TypedContractMethod<[newFee: BigNumberish], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "setRequireWorldId"
   ): TypedContractMethod<
@@ -603,6 +719,9 @@ export interface PublisherRegistry extends BaseContract {
     [void],
     "nonpayable"
   >;
+  getFunction(
+    nameOrSignature: "usdc"
+  ): TypedContractMethod<[], [string], "view">;
 
   getEvent(
     key: "CallRecorded"
@@ -645,6 +764,27 @@ export interface PublisherRegistry extends BaseContract {
     PaymasterUpdatedEvent.InputTuple,
     PaymasterUpdatedEvent.OutputTuple,
     PaymasterUpdatedEvent.OutputObject
+  >;
+  getEvent(
+    key: "PlatformWalletUpdated"
+  ): TypedContractEvent<
+    PlatformWalletUpdatedEvent.InputTuple,
+    PlatformWalletUpdatedEvent.OutputTuple,
+    PlatformWalletUpdatedEvent.OutputObject
+  >;
+  getEvent(
+    key: "PublishingFeePaid"
+  ): TypedContractEvent<
+    PublishingFeePaidEvent.InputTuple,
+    PublishingFeePaidEvent.OutputTuple,
+    PublishingFeePaidEvent.OutputObject
+  >;
+  getEvent(
+    key: "PublishingFeeUpdated"
+  ): TypedContractEvent<
+    PublishingFeeUpdatedEvent.InputTuple,
+    PublishingFeeUpdatedEvent.OutputTuple,
+    PublishingFeeUpdatedEvent.OutputObject
   >;
   getEvent(
     key: "WorldIdRequirementSet"
@@ -719,6 +859,39 @@ export interface PublisherRegistry extends BaseContract {
       PaymasterUpdatedEvent.InputTuple,
       PaymasterUpdatedEvent.OutputTuple,
       PaymasterUpdatedEvent.OutputObject
+    >;
+
+    "PlatformWalletUpdated(address,address)": TypedContractEvent<
+      PlatformWalletUpdatedEvent.InputTuple,
+      PlatformWalletUpdatedEvent.OutputTuple,
+      PlatformWalletUpdatedEvent.OutputObject
+    >;
+    PlatformWalletUpdated: TypedContractEvent<
+      PlatformWalletUpdatedEvent.InputTuple,
+      PlatformWalletUpdatedEvent.OutputTuple,
+      PlatformWalletUpdatedEvent.OutputObject
+    >;
+
+    "PublishingFeePaid(uint256,address,uint256)": TypedContractEvent<
+      PublishingFeePaidEvent.InputTuple,
+      PublishingFeePaidEvent.OutputTuple,
+      PublishingFeePaidEvent.OutputObject
+    >;
+    PublishingFeePaid: TypedContractEvent<
+      PublishingFeePaidEvent.InputTuple,
+      PublishingFeePaidEvent.OutputTuple,
+      PublishingFeePaidEvent.OutputObject
+    >;
+
+    "PublishingFeeUpdated(uint256,uint256)": TypedContractEvent<
+      PublishingFeeUpdatedEvent.InputTuple,
+      PublishingFeeUpdatedEvent.OutputTuple,
+      PublishingFeeUpdatedEvent.OutputObject
+    >;
+    PublishingFeeUpdated: TypedContractEvent<
+      PublishingFeeUpdatedEvent.InputTuple,
+      PublishingFeeUpdatedEvent.OutputTuple,
+      PublishingFeeUpdatedEvent.OutputObject
     >;
 
     "WorldIdRequirementSet(uint256,bool)": TypedContractEvent<

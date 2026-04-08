@@ -1856,8 +1856,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/PublisherRegistry.sol": {
-      "lastModificationDate": 1775388712124,
-      "contentHash": "0e653add2b20d79bcc0fd70c42033f7c",
+      "lastModificationDate": 1775638784128,
+      "contentHash": "fec427718081407ccfe24a8b76ddee6f",
       "sourceName": "contracts/PublisherRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -1884,7 +1884,8 @@
         }
       },
       "imports": [
-        "@openzeppelin/contracts/access/Ownable.sol"
+        "@openzeppelin/contracts/access/Ownable.sol",
+        "@openzeppelin/contracts/token/ERC20/IERC20.sol"
       ],
       "versionPragmas": [
         "^0.8.24"

@@ -158,13 +158,30 @@ export function PublishForm() {
       const endpointId = overviewJson.registry.endpointCount;
       const endpointName = endpointNameFromUrl();
 
-      // Step 1: Register on PublisherRegistry
-      setPublishStep("1/2 Registering endpoint...");
       const priceNum = parseDecimalInput(price);
       if (!Number.isFinite(priceNum) || priceNum < 0) {
         throw new Error("Invalid price — use a decimal number (e.g. 0.03)");
       }
       const priceUnits = BigInt(Math.round(priceNum * 1_000_000));
+
+      // Step 1: Approve USDC for publishing fee (1 USDC)
+      const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e" as `0x${string}`;
+      const PUBLISHING_FEE = 1_000_000n; // 1 USDC (6 decimals)
+      const ERC20_ABI = [
+        { name: "approve", type: "function", inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }], outputs: [{ name: "", type: "bool" }], stateMutability: "nonpayable" },
+      ] as const;
+
+      setPublishStep("1/3 Approving 1 USDC publishing fee...");
+      await wallet.writeContract(
+        selectedNet,
+        USDC_ADDRESS,
+        ERC20_ABI as any,
+        "approve",
+        [DEPLOYMENTS[selectedNet].publisherRegistry, PUBLISHING_FEE]
+      );
+
+      // Step 2: Register on PublisherRegistry (pays the fee)
+      setPublishStep("2/3 Registering endpoint...");
       const regHash = await wallet.writeContract(
         selectedNet,
         DEPLOYMENTS[selectedNet].publisherRegistry,

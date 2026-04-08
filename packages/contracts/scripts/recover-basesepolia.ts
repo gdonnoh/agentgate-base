@@ -9,7 +9,7 @@ import * as dotenv from "dotenv";
 
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
-const REGISTRY_ADDRESS  = "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3";
+const REGISTRY_ADDRESS  = "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2";
 const PAYMASTER_ADDRESS = "0xfb274b563b2c1f9f9b77cf0944b99b00c006e754";
 const ENTRYPOINT_V07    = "0x0000000071727De22E5E9d8BAf0edAc6f37da032";
 

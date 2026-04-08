@@ -4,7 +4,7 @@ import { defineChain } from "viem";
 import { proxyStore, callTracker } from "../services/proxyStore";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
-const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3") as `0x${string}`;
+const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
 
 const baseSepoliaChain = defineChain({
   id: 84532, name: "Base Sepolia",

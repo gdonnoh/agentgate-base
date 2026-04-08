@@ -2,13 +2,17 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title PublisherRegistry
  * @notice Registry for API publishers and their x402-protected endpoints.
- *         Publishers register endpoints with prices and optional Paymaster addresses.
+ *         Publishers pay a one-time USDC publishing fee to register an endpoint.
  */
 contract PublisherRegistry is Ownable {
+    IERC20 public immutable usdc;
+    address public platformWallet;
+    uint256 public publishingFee; // USDC 6 decimals (e.g. 1_000_000 = 1 USDC)
     struct Endpoint {
         uint256 id;
         address publisher;
@@ -42,8 +46,17 @@ contract PublisherRegistry is Ownable {
     event WorldIdRequirementSet(uint256 indexed id, bool required);
     event PaymasterUpdated(uint256 indexed id, address paymasterAddress);
     event CallRecorded(uint256 indexed id, address indexed caller, uint256 revenue);
+    event PublishingFeePaid(uint256 indexed id, address indexed publisher, uint256 amount);
+    event PublishingFeeUpdated(uint256 oldFee, uint256 newFee);
+    event PlatformWalletUpdated(address oldWallet, address newWallet);
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address _usdc, address _platformWallet, uint256 _publishingFee) Ownable(msg.sender) {
+        require(_usdc != address(0), "Invalid USDC");
+        require(_platformWallet != address(0), "Invalid platform wallet");
+        usdc = IERC20(_usdc);
+        platformWallet = _platformWallet;
+        publishingFee = _publishingFee;
+    }
 
     /// @notice Authorize a server/relayer address to call recordCall.
     function setTrustedCaller(address _caller) external onlyOwner {
@@ -56,9 +69,10 @@ contract PublisherRegistry is Ownable {
     }
 
     /**
-     * @notice Register a new API endpoint
+     * @notice Register a new API endpoint. Requires paying `publishingFee` in USDC.
+     *         Caller must first approve USDC spending to this contract.
      * @param url The API endpoint URL
-     * @param pricePerCall USD amount, 6 decimals (settlement is HBAR off-chain)
+     * @param pricePerCall USD amount, 6 decimals ($0.01 = 10000); settled in USDC
      * @param paymasterAddress Address of the Paymaster (0x0 if none)
      */
     function registerEndpoint(
@@ -66,6 +80,14 @@ contract PublisherRegistry is Ownable {
         uint256 pricePerCall,
         address paymasterAddress
     ) external returns (uint256 id) {
+        // Collect publishing fee (if > 0)
+        if (publishingFee > 0) {
+            require(
+                usdc.transferFrom(msg.sender, platformWallet, publishingFee),
+                "Publishing fee transfer failed"
+            );
+        }
+
         id = nextEndpointId++;
 
         endpoints[id] = Endpoint({
@@ -84,6 +106,22 @@ contract PublisherRegistry is Ownable {
         publisherEndpoints[msg.sender].push(id);
 
         emit EndpointRegistered(id, msg.sender, url, pricePerCall, paymasterAddress);
+        if (publishingFee > 0) {
+            emit PublishingFeePaid(id, msg.sender, publishingFee);
+        }
+    }
+
+    /// @notice Update the publishing fee (owner only).
+    function setPublishingFee(uint256 newFee) external onlyOwner {
+        emit PublishingFeeUpdated(publishingFee, newFee);
+        publishingFee = newFee;
+    }
+
+    /// @notice Update the platform wallet that receives publishing fees.
+    function setPlatformWallet(address newWallet) external onlyOwner {
+        require(newWallet != address(0), "Invalid wallet");
+        emit PlatformWalletUpdated(platformWallet, newWallet);
+        platformWallet = newWallet;
     }
 
     /**

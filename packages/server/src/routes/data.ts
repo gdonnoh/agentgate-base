@@ -20,7 +20,7 @@ import { baseSepolia } from "viem/chains";
 import { callTracker, proxyStore } from "../services/proxyStore";
 
 // ── Contract addresses ───────────────────────────────────────────────────────
-const REGISTRY_ADDR  = "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3" as const;
+const REGISTRY_ADDR  = "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2" as const;
 const PAYMASTER_ADDR = "0xddf2721Fd097Ed8e7998858C492a62d9D378626f" as const;
 const ENTRYPOINT     = "0x0000000071727De22E5E9d8BAf0edAc6f37da032" as const;
 const DEPLOYER       = "0x05a7Ae061c14847e0B70f7851d76FC10289d69b0" as const;

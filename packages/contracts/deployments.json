@@ -3,7 +3,7 @@
     "network": "baseSepolia",
     "chainId": 84532,
     "deployer": "0x05a7Ae061c14847e0B70f7851d76FC10289d69b0",
-    "publisherRegistry": "0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3",
+    "publisherRegistry": "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2",
     "paymaster": "0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
     "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     "deployTxHash": "0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
@@ -14,7 +14,7 @@
     "weatherEndpoint": "https://agentgate.demo/api/weather",
     "deployedAt": "2026-04-03T23:25:23.022Z",
     "explorer": {
-      "publisherRegistry": "https://sepolia.basescan.org/address/0x9Aa0797C0F5b4f72fD7a9271B318a957dB8232A3",
+      "publisherRegistry": "https://sepolia.basescan.org/address/0xe5FC410c1E438D129949B9823C62CC153DD8C2F2",
       "paymaster": "https://sepolia.basescan.org/address/0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
       "deployTx": "https://sepolia.basescan.org/tx/0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
       "paymasterDeployTx": "https://sepolia.basescan.org/tx/0xf37a746f0abb8396d6b273de163509fd99562cc738d8133770490e62bc96baec",
