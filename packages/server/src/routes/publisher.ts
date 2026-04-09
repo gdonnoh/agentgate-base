@@ -4,6 +4,7 @@ import { defineChain } from "viem";
 import {
   proxyStore,
   callTracker,
+  hiddenEndpoints,
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
   DEFAULT_CONTENT_TYPE,
@@ -293,6 +294,95 @@ router.delete("/proxy-config/:endpointId", async (c) => {
   proxyStore.delete(id);
   console.log(`[proxy-config] 🗑  Endpoint #${id} proxy deactivated by ${walletAddress}`);
   return c.json({ success: true, message: `Proxy for endpoint #${id} deactivated.` });
+});
+
+/**
+ * Shared verify helper for the hide/unhide routes. Returns the lowercased
+ * wallet address on success, or a { error, status } object on failure.
+ */
+async function verifyOwnershipOfEndpoint(
+  id: number,
+  body: any,
+  action: "hide" | "unhide"
+): Promise<{ ok: true; address: string } | { ok: false; error: string; status: 400 | 403 | 500 }> {
+  const { walletAddress, signature, timestamp } = body;
+  if (!walletAddress || !signature || !timestamp) {
+    return { ok: false, error: "Missing required fields: walletAddress, signature, timestamp", status: 400 };
+  }
+  if (Math.abs(Date.now() - Number(timestamp)) > 10 * 60 * 1000) {
+    return { ok: false, error: "Signature timestamp expired (must be within 10 minutes)", status: 400 };
+  }
+
+  const message = `AgentGate ${action} endpoint\nendpointId: ${id}\ntimestamp: ${timestamp}`;
+  let recovered: string;
+  try {
+    recovered = await recoverMessageAddress({ message, signature });
+  } catch (err: any) {
+    return { ok: false, error: `Invalid signature: ${err.message}`, status: 400 };
+  }
+  if (recovered.toLowerCase() !== String(walletAddress).toLowerCase()) {
+    return { ok: false, error: "Signature mismatch", status: 403 };
+  }
+
+  try {
+    const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
+    const ep = await client.readContract({
+      address: REGISTRY, abi: REGISTRY_ABI,
+      functionName: "endpoints", args: [BigInt(id)],
+    }) as readonly [bigint, `0x${string}`, ...unknown[]];
+    if (ep[1].toLowerCase() !== String(walletAddress).toLowerCase()) {
+      return { ok: false, error: `Unauthorized: not the endpoint owner`, status: 403 };
+    }
+  } catch (err: any) {
+    return { ok: false, error: `Could not verify ownership: ${err.message}`, status: 500 };
+  }
+
+  return { ok: true, address: String(walletAddress).toLowerCase() };
+}
+
+/**
+ * POST /api/publisher/proxy-config/:endpointId/hide
+ *
+ * Hides an endpoint from the publisher's own Manage list and from the public
+ * Dashboard. The endpoint stays on-chain and the proxy keeps serving paid
+ * calls for buyers who already have the URL — this is a listing filter, not
+ * a kill switch. Signature message:
+ *   `AgentGate hide endpoint\nendpointId: <id>\ntimestamp: <ts>`
+ */
+router.post("/proxy-config/:endpointId/hide", async (c) => {
+  const id = parseInt(c.req.param("endpointId"));
+  if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
+
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+
+  const check = await verifyOwnershipOfEndpoint(id, body, "hide");
+  if (!check.ok) return c.json({ error: check.error }, check.status);
+
+  hiddenEndpoints.hide(id, check.address);
+  console.log(`[proxy-config] 🙈  Endpoint #${id} hidden by ${check.address}`);
+  return c.json({ success: true, hidden: true, endpointId: id });
+});
+
+/**
+ * POST /api/publisher/proxy-config/:endpointId/unhide
+ *
+ * Inverse of /hide. Brings the endpoint back into the Manage list and the
+ * public Dashboard. Same signature pattern.
+ */
+router.post("/proxy-config/:endpointId/unhide", async (c) => {
+  const id = parseInt(c.req.param("endpointId"));
+  if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
+
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+
+  const check = await verifyOwnershipOfEndpoint(id, body, "unhide");
+  if (!check.ok) return c.json({ error: check.error }, check.status);
+
+  hiddenEndpoints.unhide(id, check.address);
+  console.log(`[proxy-config] 👀  Endpoint #${id} un-hidden by ${check.address}`);
+  return c.json({ success: true, hidden: false, endpointId: id });
 });
 
 /**

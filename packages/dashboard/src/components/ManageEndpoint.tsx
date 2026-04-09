@@ -42,6 +42,7 @@ interface MyEndpoint {
   liveness?: Liveness;
   inFlight?: number;
   contentType?: "webpage" | "api";
+  hidden?: boolean;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,6 +65,9 @@ export function ManageEndpoint() {
   const [saveStep, setSaveStep] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveDone, setSaveDone] = useState<string | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
+  const [hidingId, setHidingId] = useState<number | null>(null);
+  const [hideError, setHideError] = useState<string | null>(null);
 
   const netData = NETWORKS[NET];
   const paymasterAddr = DEPLOYMENTS[NET].paymaster;
@@ -96,6 +100,7 @@ export function ManageEndpoint() {
           liveness: ep.liveness ?? undefined,
           inFlight: ep.inFlight ?? 0,
           contentType: ep.contentType,
+          hidden: ep.hidden ?? false,
         }));
 
       setMyEndpoints(results);
@@ -113,6 +118,47 @@ export function ManageEndpoint() {
       setMyEndpoints([]);
     }
   }, [wallet.state.connected, wallet.state.address, fetchMyEndpoints]);
+
+  // ── Hide / unhide an endpoint ─────────────────────────────────────────────
+  async function toggleHidden(ep: MyEndpoint) {
+    if (!wallet.state.address) return;
+    const action = ep.hidden ? "unhide" : "hide";
+    if (action === "hide") {
+      const ok = window.confirm(
+        `Hide endpoint #${ep.id} from your Manage list and the public Dashboard?\n\n` +
+        `This does NOT deactivate the endpoint on-chain. Buyers who already have the ` +
+        `URL can still pay and use it. You can un-hide from the "Show hidden" toggle.`
+      );
+      if (!ok) return;
+    }
+    setHidingId(ep.id);
+    setHideError(null);
+    try {
+      const timestamp = Date.now();
+      const message = `AgentGate ${action} endpoint\nendpointId: ${ep.id}\ntimestamp: ${timestamp}`;
+      const signature = await (window as any).ethereum.request({
+        method: "personal_sign",
+        params: [message, wallet.state.address],
+      });
+      const res = await fetch(`${SERVER_URL}/api/publisher/proxy-config/${ep.id}/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: wallet.state.address,
+          signature,
+          timestamp,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      // Refetch so UI reflects new hidden state.
+      await fetchMyEndpoints(wallet.state.address);
+    } catch (e: any) {
+      setHideError(e?.shortMessage || e?.message || String(e));
+    } finally {
+      setHidingId(null);
+    }
+  }
 
   // ── Open / close management ───────────────────────────────────────────────
 
@@ -177,6 +223,14 @@ export function ManageEndpoint() {
   const gasSharePct = Math.round(newBps / 100);
   const topUpFloat = parseFloat(topUpAmt) || 0;
 
+  // Visible list respects the "show hidden" toggle. Totals below are
+  // computed over ALL owned endpoints regardless of hidden state so the
+  // publisher still sees the real aggregate numbers.
+  const visibleEndpoints = showHidden
+    ? myEndpoints
+    : myEndpoints.filter(e => !e.hidden);
+  const hiddenCount = myEndpoints.filter(e => e.hidden).length;
+
   // Aggregate from proxyStats — the on-chain registry counters (e.totalCalls /
   // e.totalRevenue) are never updated by the proxy x402 path, so they're
   // always 0. proxyStats is the real source of truth for paid traffic.
@@ -224,8 +278,19 @@ export function ManageEndpoint() {
         <div className="flex items-center gap-3">
           {myEndpoints.length > 0 && (
             <span className="text-xs text-text-muted">
-              {myEndpoints.length} endpoint{myEndpoints.length !== 1 ? "s" : ""}
+              {visibleEndpoints.length}{showHidden ? "" : ` / ${myEndpoints.length}`} endpoint{visibleEndpoints.length !== 1 ? "s" : ""}
             </span>
+          )}
+          {hiddenCount > 0 && (
+            <label className="flex items-center gap-1.5 text-[11px] text-text-muted font-sans cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showHidden}
+                onChange={(e) => setShowHidden(e.target.checked)}
+                className="accent-accent cursor-pointer"
+              />
+              Show hidden ({hiddenCount})
+            </label>
           )}
           <button
             onClick={() => wallet.state.address && fetchMyEndpoints(wallet.state.address)}
@@ -242,6 +307,13 @@ export function ManageEndpoint() {
           </button>
         </div>
       </div>
+
+      {/* Hide/unhide error */}
+      {hideError && (
+        <div className="card border-error bg-error-dim text-xs text-error">
+          Failed to toggle hidden state: {hideError}
+        </div>
+      )}
 
       {/* Loading / empty state */}
       {myEndpointsLoading && myEndpoints.length === 0 ? (
@@ -267,7 +339,7 @@ export function ManageEndpoint() {
           </div>
 
           {/* Endpoint cards */}
-          {myEndpoints.map((ep) => {
+          {visibleEndpoints.map((ep) => {
             const isManaging = managingId === ep.id;
             const shareChanged = isManaging && newBps !== ep.gasSharePct * 100;
 
@@ -294,7 +366,22 @@ export function ManageEndpoint() {
                   })()}
                   <span className="text-sm text-text-dim font-mono break-all leading-relaxed flex-1">
                     {ep.url}
+                    {ep.hidden && (
+                      <span className="ml-2 text-[10px] font-sans text-text-muted italic">
+                        (hidden)
+                      </span>
+                    )}
                   </span>
+                  <button
+                    onClick={() => toggleHidden(ep)}
+                    disabled={hidingId === ep.id}
+                    title={ep.hidden
+                      ? "Un-hide this endpoint (will appear in Manage + public Dashboard again)"
+                      : "Hide this endpoint from Manage and the public Dashboard"}
+                    className="shrink-0 text-xs font-mono px-2 py-1 rounded-sm border bg-transparent text-text-muted border-border hover:text-warning hover:border-warning/30 transition-all duration-150 disabled:opacity-50"
+                  >
+                    {hidingId === ep.id ? "..." : ep.hidden ? "Unhide" : "Hide"}
+                  </button>
                   <button
                     onClick={() => isManaging ? closeManage() : openManage(ep)}
                     className={`shrink-0 text-xs font-mono px-3 py-1 rounded-sm border transition-all duration-150 ${

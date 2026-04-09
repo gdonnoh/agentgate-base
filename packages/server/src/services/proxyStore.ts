@@ -127,6 +127,11 @@ const POSTGRES_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 // In-memory cache (always used for fast reads)
 const cache = new Map<number, ProxyConfig>();
 
+// Hidden endpoint tracker — per-publisher Set of endpoint IDs the publisher
+// has opted to hide from their Manage view and the public Dashboard. Lookup
+// key is the lowercased wallet address.
+const hiddenByPublisher = new Map<string, Set<number>>();
+
 // ── PostgreSQL backend ──────────────────────────────────────────────────────
 let pgPool: any = null;
 
@@ -198,6 +203,19 @@ async function initPostgres() {
     await pgPool.query(
       "CREATE INDEX IF NOT EXISTS idx_proxy_calls_endpoint ON proxy_calls(endpoint_id)"
     );
+    // Hidden endpoints — a publisher flagging their own endpoint as hidden
+    // removes it from their Manage list and from the public dashboard. The
+    // endpoint itself stays on-chain (we can't burn it) and the proxy still
+    // serves paid calls for buyers who already know the URL — this table is
+    // purely a frontend listing filter.
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS hidden_endpoints (
+        endpoint_id    INTEGER NOT NULL,
+        publisher_addr TEXT NOT NULL,
+        hidden_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (endpoint_id, publisher_addr)
+      )
+    `);
 
     // Load all proxy configs into cache
     const { rows } = await pgPool.query("SELECT * FROM proxy_configs");
@@ -241,8 +259,17 @@ async function initPostgres() {
       }
     }
 
+    // Hydrate hidden endpoints from DB — one key per (publisherAddr) → Set<id>
+    const { rows: hiddenRows } = await pgPool.query("SELECT * FROM hidden_endpoints");
+    for (const row of hiddenRows) {
+      const addr = String(row.publisher_addr).toLowerCase();
+      const set = hiddenByPublisher.get(addr) || new Set<number>();
+      set.add(Number(row.endpoint_id));
+      hiddenByPublisher.set(addr, set);
+    }
+
     console.log(
-      `[proxyStore] PostgreSQL connected — loaded ${cache.size} configs, ${callRows.length} call records`
+      `[proxyStore] PostgreSQL connected — loaded ${cache.size} configs, ${callRows.length} call records, ${hiddenRows.length} hidden entries`
     );
     return true;
   } catch (e: any) {
@@ -366,5 +393,69 @@ export const proxyStore = {
 
   all(): ProxyConfig[] {
     return Array.from(cache.values());
+  },
+};
+
+// ── Hidden endpoints API ────────────────────────────────────────────────────
+async function pgHide(endpointId: number, publisherAddr: string) {
+  if (!pgPool) return;
+  await pgPool.query(
+    `INSERT INTO hidden_endpoints (endpoint_id, publisher_addr)
+     VALUES ($1, $2)
+     ON CONFLICT (endpoint_id, publisher_addr) DO NOTHING`,
+    [endpointId, publisherAddr]
+  );
+}
+
+async function pgUnhide(endpointId: number, publisherAddr: string) {
+  if (!pgPool) return;
+  await pgPool.query(
+    `DELETE FROM hidden_endpoints WHERE endpoint_id = $1 AND publisher_addr = $2`,
+    [endpointId, publisherAddr]
+  );
+}
+
+export const hiddenEndpoints = {
+  /** Is this endpoint currently hidden by the given publisher? */
+  isHidden(endpointId: number, publisherAddr: string): boolean {
+    const addr = publisherAddr.toLowerCase();
+    return hiddenByPublisher.get(addr)?.has(endpointId) ?? false;
+  },
+
+  /** List of hidden endpoint IDs for a given publisher. */
+  getHiddenIds(publisherAddr: string): number[] {
+    const addr = publisherAddr.toLowerCase();
+    return Array.from(hiddenByPublisher.get(addr) || []);
+  },
+
+  /** Is this endpoint hidden by ANY publisher? Used by the public /overview
+   *  to drop hidden-by-owner rows from the global listing. */
+  isHiddenAnywhere(endpointId: number): boolean {
+    for (const set of hiddenByPublisher.values()) {
+      if (set.has(endpointId)) return true;
+    }
+    return false;
+  },
+
+  hide(endpointId: number, publisherAddr: string) {
+    const addr = publisherAddr.toLowerCase();
+    const set = hiddenByPublisher.get(addr) || new Set<number>();
+    set.add(endpointId);
+    hiddenByPublisher.set(addr, set);
+    if (usePostgres) {
+      pgHide(endpointId, addr).catch(e => console.warn("[hidden] pgHide error:", e.message));
+    }
+  },
+
+  unhide(endpointId: number, publisherAddr: string) {
+    const addr = publisherAddr.toLowerCase();
+    const set = hiddenByPublisher.get(addr);
+    if (set) {
+      set.delete(endpointId);
+      if (set.size === 0) hiddenByPublisher.delete(addr);
+    }
+    if (usePostgres) {
+      pgUnhide(endpointId, addr).catch(e => console.warn("[hidden] pgUnhide error:", e.message));
+    }
   },
 };

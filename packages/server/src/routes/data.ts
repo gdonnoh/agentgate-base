@@ -17,7 +17,7 @@ import {
   toBytes,
 } from "viem";
 import { baseSepolia } from "viem/chains";
-import { callTracker, proxyStore } from "../services/proxyStore";
+import { callTracker, proxyStore, hiddenEndpoints } from "../services/proxyStore";
 import { getLivenessSummary } from "../services/liveness";
 import { getInFlightCount } from "./proxy";
 
@@ -302,9 +302,13 @@ async function buildOverview() {
     },
     registry: { address: REGISTRY_ADDR, endpointCount },
     gasPrice: { wei: gasPrice.toString(), gwei: Number(gasPrice) / 1e9 },
-    // Strip backend URL + hostname from the public listing. The Manage tab
-    // uses /publisher/:address which returns the full objects.
-    endpoints: endpoints.map(redactPrivateEndpointFields),
+    // Strip backend URL + hostname from the public listing, AND drop any
+    // endpoint whose owner has chosen to hide it. The Manage tab uses
+    // /publisher/:address which returns the full objects including hidden
+    // ones (owner needs to see them to un-hide).
+    endpoints: endpoints
+      .filter((ep: any) => !hiddenEndpoints.isHiddenAnywhere(ep.id))
+      .map(redactPrivateEndpointFields),
     timestamp: Date.now(),
   };
 }
@@ -406,10 +410,13 @@ dataRouter.get("/publisher/:address", async (c) => {
           }
         }
 
-        // proxyStats is already attached by readEndpoint().
+        // proxyStats is already attached by readEndpoint(). Include the
+        // hidden flag so the publisher can see which endpoints they've
+        // hidden themselves and un-hide them from the Manage UI.
         return {
           ...ep,
           paymaster: paymasterData,
+          hidden: hiddenEndpoints.isHidden(id, address),
         };
       })
     );
