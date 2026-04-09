@@ -119,11 +119,32 @@ const cache = new Map<number, ProxyConfig>();
 // ── PostgreSQL backend ──────────────────────────────────────────────────────
 let pgPool: any = null;
 
+/**
+ * Strip `sslmode=...` from a Postgres URL. pg-connection-string (used by
+ * node-postgres) parses `sslmode` from the URL and prints a deprecation
+ * warning on every connect because the semantics of `prefer`/`require` are
+ * changing in pg v9. We pass our own `ssl` object to Pool() anyway, so the
+ * URL-level sslmode is redundant — removing it silences the warning.
+ */
+function stripSslMode(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete("sslmode");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 async function initPostgres() {
   if (!POSTGRES_URL) return false;
   try {
     const { Pool } = await import("pg");
-    pgPool = new Pool({ connectionString: POSTGRES_URL, ssl: { rejectUnauthorized: false }, max: 5 });
+    pgPool = new Pool({
+      connectionString: stripSslMode(POSTGRES_URL),
+      ssl: { rejectUnauthorized: false },
+      max: 5,
+    });
 
     // Create tables if not exist
     await pgPool.query(`

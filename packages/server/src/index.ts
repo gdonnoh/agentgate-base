@@ -182,6 +182,22 @@ app.get("/health", (c) => {
   });
 });
 
+// Root — used by Render health probes + humans poking around with curl.
+// Returning 200 here silences the 404s in the access log.
+app.get("/", (c) => {
+  return c.json({
+    service: "agentgate-server",
+    status: "ok",
+    docs: "https://github.com/gdonnoh/agentgate-base",
+    endpoints: {
+      health: "/health",
+      data: "/api/data/overview",
+      proxy: "/api/proxy/:endpointId/*",
+    },
+  });
+});
+app.all("/", (c) => c.body(null, 200));
+
 // Mount protected routes
 app.route("/api/weather", weatherRouter);
 app.route("/api/prices", pricesRouter);

@@ -119,18 +119,33 @@ const ENTRYPOINT_ABI = [
   },
 ] as const;
 
-// ── Simple in-memory cache (30s TTL) ────────────────────────────────────────
+// ── In-memory cache with stale-while-revalidate ─────────────────────────────
+// Fresh hit: within CACHE_TTL_MS → serve as-is, no RPC hit
+// Stale hit: between TTL and STALE_TTL → serve stale + attempt background refresh
+// Outside STALE_TTL: fall through to a fresh fetch (or error if that also fails)
+//
+// This matters on Render because the free Base Sepolia public RPC
+// (sepolia.base.org) rate-limits aggressively. If the refresh fetch fails,
+// we'd rather keep serving last-known data than break the dashboard.
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
 }
 
-const CACHE_TTL_MS = 30_000;
+const CACHE_TTL_MS       = 30_000;      // 30s — "fresh"
+const CACHE_STALE_TTL_MS = 10 * 60_000; // 10 min — still serve on RPC error
 let overviewCache: CacheEntry<any> | null = null;
+let overviewRefreshInFlight: Promise<any> | null = null;
 
-function getCached<T>(entry: CacheEntry<T> | null): T | null {
+function getFreshCached<T>(entry: CacheEntry<T> | null): T | null {
   if (!entry) return null;
   if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
+  return entry.data;
+}
+
+function getStaleCached<T>(entry: CacheEntry<T> | null): T | null {
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > CACHE_STALE_TTL_MS) return null;
   return entry.data;
 }
 
@@ -224,80 +239,115 @@ async function readPaymasterData(url: string) {
 // ── Router ───────────────────────────────────────────────────────────────────
 const dataRouter = new Hono();
 
+/** The actual RPC-heavy work of building the overview payload. */
+async function buildOverview() {
+  // Global reads in parallel
+  const [deployerBalanceRaw, paymasterDeposit, totalCalls, totalSponsored, nextId, gasPrice] =
+    await Promise.all([
+      client.getBalance({ address: DEPLOYER }),
+      client.readContract({
+        address: ENTRYPOINT,
+        abi: ENTRYPOINT_ABI,
+        functionName: "balanceOf",
+        args: [PAYMASTER_ADDR],
+      }) as Promise<bigint>,
+      client.readContract({
+        address: PAYMASTER_ADDR,
+        abi: PAYMASTER_ABI,
+        functionName: "totalCalls",
+      }) as Promise<bigint>,
+      client.readContract({
+        address: PAYMASTER_ADDR,
+        abi: PAYMASTER_ABI,
+        functionName: "getTotalSponsored",
+      }) as Promise<bigint>,
+      client.readContract({
+        address: REGISTRY_ADDR,
+        abi: REGISTRY_ABI,
+        functionName: "nextEndpointId",
+      }) as Promise<bigint>,
+      client.getGasPrice(),
+    ]);
+
+  const endpointCount = Number(nextId);
+  const endpointIds = Array.from({ length: endpointCount }, (_, i) => i);
+  const endpoints = await Promise.all(endpointIds.map((id) => readEndpoint(id)));
+
+  return {
+    deployer: { address: DEPLOYER, balance: formatEther(deployerBalanceRaw) },
+    paymaster: {
+      address:        PAYMASTER_ADDR,
+      deposit:        formatEther(paymasterDeposit),
+      depositRaw:     paymasterDeposit.toString(),
+      totalCalls:     Number(totalCalls),
+      totalSponsored: formatEther(totalSponsored),
+    },
+    registry: { address: REGISTRY_ADDR, endpointCount },
+    gasPrice: { wei: gasPrice.toString(), gwei: Number(gasPrice) / 1e9 },
+    endpoints,
+    timestamp: Date.now(),
+  };
+}
+
 /**
  * GET /overview
  *
  * Returns global stats: deployer balance, paymaster deposit, totalCalls,
  * totalSponsored, all endpoints, and live gas price.
- * Cached for 30 seconds.
+ *
+ * Cache model (stale-while-revalidate):
+ *   Fresh (≤30s):   return cached data, no RPC.
+ *   Stale (≤10min): return cached data AND kick off a background refresh.
+ *                   Protects the dashboard from temporary RPC rate limits.
+ *   Expired (>10min) or no cache: block and fetch fresh.
  */
 dataRouter.get("/overview", async (c) => {
-  const cached = getCached(overviewCache);
-  if (cached) return c.json(cached);
+  const fresh = getFreshCached(overviewCache);
+  if (fresh) return c.json(fresh);
 
+  const stale = getStaleCached(overviewCache);
+  if (stale) {
+    // Serve stale immediately; refresh in background so the next request
+    // sees the new data. Avoid stampede with overviewRefreshInFlight.
+    if (!overviewRefreshInFlight) {
+      overviewRefreshInFlight = buildOverview()
+        .then((result) => {
+          overviewCache = { data: result, timestamp: Date.now() };
+          return result;
+        })
+        .catch((err) => {
+          console.warn(`[data/overview] background refresh failed (serving stale): ${err.message}`);
+          return null;
+        })
+        .finally(() => {
+          overviewRefreshInFlight = null;
+        });
+    }
+    return c.json({ ...stale, _stale: true });
+  }
+
+  // No cache at all — must block. Reuse any in-flight refresh to avoid
+  // duplicate RPC work if multiple clients hit this simultaneously.
   try {
-    // Global reads in parallel
-    const [deployerBalanceRaw, paymasterDeposit, totalCalls, totalSponsored, nextId, gasPrice] =
-      await Promise.all([
-        client.getBalance({ address: DEPLOYER }),
-        client.readContract({
-          address: ENTRYPOINT,
-          abi: ENTRYPOINT_ABI,
-          functionName: "balanceOf",
-          args: [PAYMASTER_ADDR],
-        }) as Promise<bigint>,
-        client.readContract({
-          address: PAYMASTER_ADDR,
-          abi: PAYMASTER_ABI,
-          functionName: "totalCalls",
-        }) as Promise<bigint>,
-        client.readContract({
-          address: PAYMASTER_ADDR,
-          abi: PAYMASTER_ABI,
-          functionName: "getTotalSponsored",
-        }) as Promise<bigint>,
-        client.readContract({
-          address: REGISTRY_ADDR,
-          abi: REGISTRY_ABI,
-          functionName: "nextEndpointId",
-        }) as Promise<bigint>,
-        client.getGasPrice(),
-      ]);
-
-    const endpointCount = Number(nextId);
-
-    // Read all endpoints in parallel
-    const endpointIds = Array.from({ length: endpointCount }, (_, i) => i);
-    const endpoints = await Promise.all(endpointIds.map((id) => readEndpoint(id)));
-
-    const result = {
-      deployer: {
-        address: DEPLOYER,
-        balance: formatEther(deployerBalanceRaw),
-      },
-      paymaster: {
-        address:        PAYMASTER_ADDR,
-        deposit:        formatEther(paymasterDeposit),
-        depositRaw:     paymasterDeposit.toString(),
-        totalCalls:     Number(totalCalls),
-        totalSponsored: formatEther(totalSponsored),
-      },
-      registry: {
-        address:       REGISTRY_ADDR,
-        endpointCount,
-      },
-      gasPrice: {
-        wei:  gasPrice.toString(),
-        gwei: Number(gasPrice) / 1e9,
-      },
-      endpoints,
-      timestamp: Date.now(),
-    };
-
-    overviewCache = { data: result, timestamp: Date.now() };
+    if (!overviewRefreshInFlight) {
+      overviewRefreshInFlight = buildOverview()
+        .then((result) => {
+          overviewCache = { data: result, timestamp: Date.now() };
+          return result;
+        })
+        .finally(() => {
+          overviewRefreshInFlight = null;
+        });
+    }
+    const result = await overviewRefreshInFlight;
     return c.json(result);
   } catch (err: any) {
     console.error("[data/overview] RPC error:", err.message);
+    // Last-ditch: if we have ANY cached data (even beyond stale TTL), serve it
+    // with an obvious marker rather than breaking the dashboard.
+    if (overviewCache) {
+      return c.json({ ...overviewCache.data, _stale: true, _error: err.message });
+    }
     return c.json({ error: "Failed to read on-chain data", details: err.message }, 502);
   }
 });
