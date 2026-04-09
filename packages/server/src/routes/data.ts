@@ -165,6 +165,9 @@ async function readEndpoint(id: number) {
     name:            proxyConfig?.name,
     backendUrl:      proxyConfig?.backendUrl,
     hasProxy:        !!proxyConfig,
+    // Capacity controls — set by publisher, enforced by the proxy route
+    maxConcurrent:          proxyConfig?.maxConcurrent,
+    paymentTimeoutSeconds:  proxyConfig?.paymentTimeoutSeconds,
     // Enriched from in-memory call tracker (resets on server restart)
     proxyStats,
   };

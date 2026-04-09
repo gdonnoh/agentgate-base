@@ -1,7 +1,16 @@
 import { Hono } from "hono";
 import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { defineChain } from "viem";
-import { proxyStore, callTracker } from "../services/proxyStore";
+import {
+  proxyStore,
+  callTracker,
+  DEFAULT_MAX_CONCURRENT,
+  DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+  MIN_MAX_CONCURRENT,
+  MAX_MAX_CONCURRENT,
+  MIN_PAYMENT_TIMEOUT_SECONDS,
+  MAX_PAYMENT_TIMEOUT_SECONDS,
+} from "../services/proxyStore";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
@@ -189,7 +198,19 @@ router.post("/proxy-config", async (c) => {
     }, 422);
   }
 
-  // 5. Store proxy config
+  // 5. Validate + clamp the new capacity fields. We clamp silently instead of
+  //    rejecting, so the frontend can be strict while older clients stay usable.
+  const maxConcurrentRaw = Number(body.maxConcurrent);
+  const maxConcurrent = Number.isFinite(maxConcurrentRaw)
+    ? Math.min(MAX_MAX_CONCURRENT, Math.max(MIN_MAX_CONCURRENT, Math.floor(maxConcurrentRaw)))
+    : DEFAULT_MAX_CONCURRENT;
+
+  const paymentTimeoutRaw = Number(body.paymentTimeoutSeconds);
+  const paymentTimeoutSeconds = Number.isFinite(paymentTimeoutRaw)
+    ? Math.min(MAX_PAYMENT_TIMEOUT_SECONDS, Math.max(MIN_PAYMENT_TIMEOUT_SECONDS, Math.floor(paymentTimeoutRaw)))
+    : DEFAULT_PAYMENT_TIMEOUT_SECONDS;
+
+  // 6. Store proxy config
   proxyStore.set({
     endpointId:     Number(endpointId),
     name:           (body.name || "").trim() || `Endpoint #${endpointId}`,
@@ -198,6 +219,8 @@ router.post("/proxy-config", async (c) => {
     publisherAddr:  walletAddress.toLowerCase(),
     requireWorldId: body.requireWorldId === true,
     registeredAt:   new Date(),
+    maxConcurrent,
+    paymentTimeoutSeconds,
   });
 
   console.log(`[proxy-config] ✅ Endpoint #${endpointId} → ${backendUrl} (verified, by ${walletAddress})`);
@@ -281,6 +304,8 @@ router.get("/proxy-config/:endpointId", (c) => {
     publisherAddr:  config.publisherAddr,
     requireWorldId: config.requireWorldId,
     registeredAt:   config.registeredAt,
+    maxConcurrent:  config.maxConcurrent,
+    paymentTimeoutSeconds: config.paymentTimeoutSeconds,
     proxyUrl:       `/api/proxy/${config.endpointId}`,
   });
 });

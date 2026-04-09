@@ -14,10 +14,35 @@ import { Hono } from "hono";
 import { createPublicClient, http } from "viem";
 import { defineChain } from "viem";
 import { HTTPFacilitatorClient } from "@x402/core/http";
-import { proxyStore, callTracker } from "../services/proxyStore";
+import {
+  proxyStore,
+  callTracker,
+  DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+} from "../services/proxyStore";
 import { validateAgentKitHeader } from "../services/agentkit";
 import { config, USDC_ADDRESS } from "../config";
 import { paywallHtml } from "../paywall";
+
+// ── Per-endpoint concurrency tracker ─────────────────────────────────────────
+// In-memory semaphore counting in-flight paid forwards per endpointId. When
+// the count reaches proxyConfig.maxConcurrent we reject new requests with 429
+// BEFORE accepting payment, so callers are never charged for capacity limits.
+// This Map is intentionally local to this module — it's a soft guard, not a
+// distributed lock. A restart resets counts, which is safe (callers retry).
+const inFlightByEndpoint = new Map<number, number>();
+
+function acquireSlot(endpointId: number, cap: number): boolean {
+  const cur = inFlightByEndpoint.get(endpointId) ?? 0;
+  if (cur >= cap) return false;
+  inFlightByEndpoint.set(endpointId, cur + 1);
+  return true;
+}
+
+function releaseSlot(endpointId: number): void {
+  const cur = inFlightByEndpoint.get(endpointId) ?? 0;
+  if (cur <= 1) inFlightByEndpoint.delete(endpointId);
+  else inFlightByEndpoint.set(endpointId, cur - 1);
+}
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
@@ -114,6 +139,37 @@ router.all("/:endpointId/*", async (c) => {
     return c.json({ error: `No proxy config for endpoint #${endpointId}. Register via POST /api/publisher/proxy-config` }, 404);
   }
 
+  // 1b. Concurrency gate — reject over-capacity BEFORE any payment processing
+  //     so callers are never charged when the publisher's backend is saturated.
+  //     A small retry window (3s) is communicated via Retry-After so polite
+  //     clients back off without hammering.
+  const maxConcurrent = proxyConfig.maxConcurrent;
+  if (!acquireSlot(endpointId, maxConcurrent)) {
+    const current = inFlightByEndpoint.get(endpointId) ?? 0;
+    console.log(`[proxy] 🚦 Endpoint #${endpointId} at capacity (${current}/${maxConcurrent}) — rejecting with 429`);
+    c.header("Retry-After", "3");
+    return c.json({
+      error: `Endpoint at capacity (${current}/${maxConcurrent} concurrent). Retry in a few seconds — you were NOT charged.`,
+      retryAfterSeconds: 3,
+      maxConcurrent,
+    }, 429);
+  }
+
+  try {
+    return await handleProxyRequest(c, endpointId, proxyConfig);
+  } finally {
+    releaseSlot(endpointId);
+  }
+});
+
+/**
+ * Core proxy logic. Extracted into its own function so the router can wrap the
+ * whole thing in try/finally for the concurrency slot release.
+ */
+async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any): Promise<Response> {
+  const paymentTimeoutSeconds =
+    proxyConfig.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS;
+
   // 2. Read endpoint from chain to get price + publisher address
   let priceUsd = 0.01; // fallback (registry stores USD, 6 decimals)
   let publisherAddress = PLATFORM_WALLET;
@@ -177,7 +233,7 @@ router.all("/:endpointId/*", async (c) => {
         scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET,
         maxAmountRequired: amount, asset: USDC_ADDRESS,
         extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
-        resource: c.req.url, description: proxyConfig.name, maxTimeoutSeconds: 60,
+        resource: c.req.url, description: proxyConfig.name, maxTimeoutSeconds: paymentTimeoutSeconds,
       }],
       requireWorldId: true,
       worldIdInfo: "This endpoint requires WorldID. Include a valid `agentkit` header. Verified agents get 3 free calls.",
@@ -249,7 +305,7 @@ router.all("/:endpointId/*", async (c) => {
       extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
       resource: c.req.url,
       description: proxyConfig.name,
-      maxTimeoutSeconds: 60,
+      maxTimeoutSeconds: paymentTimeoutSeconds,
     }];
     const paymentRequired: any = { x402Version: 2, accepts };
     if (requireWorldId) {
@@ -317,7 +373,7 @@ router.all("/:endpointId/*", async (c) => {
   }
 
   const amount         = usdToUsdcUnits(priceUsd);
-  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: 60, resource: c.req.url };
+  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: paymentTimeoutSeconds, resource: c.req.url };
   const verifyResult   = await facilitator.verify(paymentPayload, requirements as any);
 
   if (!verifyResult.isValid) {
@@ -332,6 +388,6 @@ router.all("/:endpointId/*", async (c) => {
 
   // 7. Forward the actual request to upstream backend
   return await forwardToUpstream(c, proxyConfig, endpointId);
-});
+}
 
 export default router;

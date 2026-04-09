@@ -55,6 +55,8 @@ export function PublishForm() {
   const [contentType,     setContentType]     = useState<"webpage" | "api">("webpage");
   const [headerRows,      setHeaderRows]      = useState<{key: string; val: string}[]>([{ key: "", val: "" }]);
   const [requireWorldId,  setRequireWorldId]  = useState(false);
+  const [maxConcurrent,   setMaxConcurrent]   = useState(3);
+  const [paymentTimeoutSeconds, setPaymentTimeoutSeconds] = useState(60);
   const [proxyDone,       setProxyDone]       = useState<string | null>(null);
   const [proxyError,      setProxyError]      = useState<string | null>(null);
 
@@ -261,6 +263,8 @@ export function PublishForm() {
               endpointId, name: endpointName || undefined,
               backendUrl: backendUrl.trim(),
               injectHeaders, requireWorldId,
+              maxConcurrent,
+              paymentTimeoutSeconds,
               walletAddress: wallet.state.address,
               signature, timestamp,
             }),
@@ -499,6 +503,65 @@ export function PublishForm() {
               </div>
             </div>
           </button>
+        </div>
+      </div>
+
+      {/* ── Capacity & Timeouts ────────────────────────────────────────── */}
+      <div className="flex flex-col gap-3">
+        <div>
+          <label className="label">Capacity & Timeouts</label>
+          <p className="text-xs text-text-muted mt-1">
+            Protect your backend from being overwhelmed. Requests beyond the concurrency cap get
+            rejected with HTTP 429 — <strong className="text-text-dim">before</strong> payment is
+            taken, so buyers are never charged for capacity limits.
+          </p>
+        </div>
+
+        {/* Max concurrent requests */}
+        <div className="flex items-center gap-3">
+          <div className="flex flex-col gap-1 flex-1">
+            <label className="label text-[10px]">Max concurrent requests</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                max={100}
+                step={1}
+                value={maxConcurrent}
+                onChange={(e) => setMaxConcurrent(Math.max(1, Math.min(100, Number(e.target.value) || 1)))}
+                className="input w-24 text-center font-mono"
+              />
+              <span className="text-xs text-text-muted font-sans">parallel calls</span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1 flex-1">
+            <label className="label text-[10px]">Payment timeout (seconds)</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={10}
+                max={300}
+                step={10}
+                value={paymentTimeoutSeconds}
+                onChange={(e) => setPaymentTimeoutSeconds(Math.max(10, Math.min(300, Number(e.target.value) || 60)))}
+                className="input w-24 text-center font-mono"
+              />
+              <span className="text-xs text-text-muted font-sans">x402 signature validity</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Hardware hints */}
+        <div className="rounded-sm px-3 py-2 text-xs bg-bg border border-border text-text-muted">
+          <strong className="text-text-dim">Sizing hints:</strong>
+          {" "}
+          Fast APIs / Vercel blogs → <code className="font-mono text-text-dim">max 20+, timeout 60s</code>.
+          {" "}
+          Local Ollama on M1/M2 → <code className="font-mono text-text-dim">max 2–3, timeout 180s</code>.
+          {" "}
+          Local Ollama on RTX 4090 → <code className="font-mono text-text-dim">max 6–8, timeout 120s</code>.
+          {" "}
+          If you're not sure, leave the defaults (3 parallel, 60s).
         </div>
       </div>
 

@@ -14,7 +14,11 @@ const INSTALL_COMMANDS: Record<Platform, string> = {
     "winget install --id Cloudflare.cloudflared",
 };
 
-const TUNNEL_COMMAND = "cloudflared tunnel --url http://localhost:11434";
+// IMPORTANT: --http-host-header is required because Ollama validates the
+// incoming Host header as a DNS-rebinding defense. Without this flag, Ollama
+// returns 403 Forbidden for every request that comes through the tunnel.
+const TUNNEL_COMMAND =
+  "cloudflared tunnel --url http://localhost:11434 --http-host-header localhost:11434";
 
 /** Small inline "copy to clipboard" button used inside code blocks. */
 function CopyButton({ text }: { text: string }) {
@@ -149,6 +153,12 @@ export function Guides({ onGoToPublish }: Props) {
           </p>
           <CodeBlock>{TUNNEL_COMMAND}</CodeBlock>
           <p className="text-xs text-text-muted font-sans">
+            The <code className="font-mono text-text-dim">--http-host-header</code> flag is{" "}
+            <strong className="text-warning">required</strong>. Ollama rejects requests whose
+            Host header doesn't match <code className="font-mono text-text-dim">localhost:11434</code>{" "}
+            (DNS-rebinding protection). Without the flag, every paid call returns 403.
+          </p>
+          <p className="text-xs text-text-muted font-sans">
             The output will include a line like:
           </p>
           <CodeBlock>https://random-words-1234.trycloudflare.com</CodeBlock>
@@ -160,12 +170,19 @@ export function Guides({ onGoToPublish }: Props) {
         {/* Step 4: publish */}
         <Step n={4} title="Publish on AgentGate">
           <p className="text-xs text-text-muted font-sans">
-            Go to the Publish tab, choose <strong className="text-text-dim">API</strong> mode, paste
-            the tunnel URL (append <code className="font-mono text-text-dim">/api/generate</code>{" "}
-            or <code className="font-mono text-text-dim">/api/chat</code> depending on the Ollama
-            endpoint you want to sell), set your price per call, and click Publish.
+            Go to the Publish tab, choose <strong className="text-text-dim">API</strong> mode, and paste{" "}
+            <strong className="text-text-dim">only the tunnel root URL</strong> (no path suffix). AgentGate
+            appends whatever path the agent requests, so the agent will call{" "}
+            <code className="font-mono text-text-dim">/api/proxy/ID/api/chat</code> and AgentGate will
+            forward it to <code className="font-mono text-text-dim">tunnel-root/api/chat</code>.
           </p>
-          <CodeBlock>https://random-words-1234.trycloudflare.com/api/chat</CodeBlock>
+          <CodeBlock>https://random-words-1234.trycloudflare.com</CodeBlock>
+          <div className="rounded-sm px-3 py-2 text-xs bg-warning/10 border border-warning/20 text-warning">
+            <strong className="font-semibold">Don't append</strong>{" "}
+            <code className="font-mono">/api/chat</code> to the backend URL — AgentGate concatenates the
+            agent's request path to the backend, so you'd end up calling{" "}
+            <code className="font-mono">tunnel/api/chat/api/chat</code> → 404.
+          </div>
           <button onClick={onGoToPublish} className="btn-primary w-fit font-mono text-xs mt-1">
             Go to Publish →
           </button>
@@ -200,6 +217,12 @@ export function Guides({ onGoToPublish }: Props) {
                 Full guide
               </a>
               .
+            </li>
+            <li>
+              <strong className="text-text-dim">Cloudflare quick tunnels have a ~100s upstream timeout.</strong>{" "}
+              If your model takes longer than 100s to respond (for example a 30B+ model on modest hardware),
+              the tunnel returns HTTP 524 and your agent never gets the reply. Stick to small/fast models
+              (1B–8B) on quick tunnels, or use a named tunnel which has higher limits.
             </li>
             <li>
               <strong className="text-text-dim">Model choice matters.</strong> Bigger models =

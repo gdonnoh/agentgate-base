@@ -22,7 +22,18 @@ export interface ProxyConfig {
   publisherAddr:   string;
   requireWorldId:  boolean;
   registeredAt:    Date;
+  /** Max concurrent in-flight proxy calls allowed; extra requests get 429 before payment. */
+  maxConcurrent:   number;
+  /** Seconds the x402 payment challenge is valid for — longer is needed for slow AI backends. */
+  paymentTimeoutSeconds: number;
 }
+
+export const DEFAULT_MAX_CONCURRENT = 3;
+export const DEFAULT_PAYMENT_TIMEOUT_SECONDS = 60;
+export const MIN_PAYMENT_TIMEOUT_SECONDS = 10;
+export const MAX_PAYMENT_TIMEOUT_SECONDS = 300;
+export const MIN_MAX_CONCURRENT = 1;
+export const MAX_MAX_CONCURRENT = 100;
 
 // ── Call tracking (persisted to Postgres if POSTGRES_URL is set) ─────────────
 //
@@ -126,6 +137,16 @@ async function initPostgres() {
         registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Add new columns for existing installs — these were added after the
+    // initial schema, so ALTER TABLE IF NOT EXISTS keeps old DBs compatible.
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS max_concurrent INTEGER NOT NULL DEFAULT ${DEFAULT_MAX_CONCURRENT}`
+    );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS payment_timeout_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_PAYMENT_TIMEOUT_SECONDS}`
+    );
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS proxy_calls (
         id            BIGSERIAL PRIMARY KEY,
@@ -153,6 +174,8 @@ async function initPostgres() {
         publisherAddr:  row.publisher_addr,
         requireWorldId: row.require_world_id,
         registeredAt:   new Date(row.registered_at),
+        maxConcurrent:  row.max_concurrent ?? DEFAULT_MAX_CONCURRENT,
+        paymentTimeoutSeconds: row.payment_timeout_seconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
       };
       cache.set(config.endpointId, config);
     }
@@ -212,13 +235,17 @@ async function pgRecordCall(
 async function pgSet(config: ProxyConfig) {
   if (!pgPool) return;
   await pgPool.query(
-    `INSERT INTO proxy_configs (endpoint_id, name, backend_url, inject_headers, publisher_addr, require_world_id, registered_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO proxy_configs
+       (endpoint_id, name, backend_url, inject_headers, publisher_addr,
+        require_world_id, registered_at, max_concurrent, payment_timeout_seconds)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
-       publisher_addr = $5, require_world_id = $6, registered_at = $7`,
+       publisher_addr = $5, require_world_id = $6, registered_at = $7,
+       max_concurrent = $8, payment_timeout_seconds = $9`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
-     config.publisherAddr, config.requireWorldId, config.registeredAt]
+     config.publisherAddr, config.requireWorldId, config.registeredAt,
+     config.maxConcurrent, config.paymentTimeoutSeconds]
   );
 }
 
@@ -235,9 +262,20 @@ function loadFromFile() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     if (fs.existsSync(STORE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as ProxyConfig[];
-      for (const config of data) {
-        config.registeredAt = new Date(config.registeredAt);
+      const data = JSON.parse(fs.readFileSync(STORE_FILE, "utf-8")) as Partial<ProxyConfig>[];
+      for (const raw of data) {
+        const config: ProxyConfig = {
+          endpointId:     raw.endpointId!,
+          name:           raw.name ?? "",
+          backendUrl:     raw.backendUrl!,
+          injectHeaders:  raw.injectHeaders ?? {},
+          publisherAddr:  raw.publisherAddr!,
+          requireWorldId: raw.requireWorldId ?? false,
+          registeredAt:   new Date(raw.registeredAt!),
+          // Back-fill defaults for configs saved before these fields existed.
+          maxConcurrent:  raw.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
+          paymentTimeoutSeconds: raw.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+        };
         cache.set(config.endpointId, config);
       }
       console.log(`[proxyStore] File loaded — ${cache.size} configs`);

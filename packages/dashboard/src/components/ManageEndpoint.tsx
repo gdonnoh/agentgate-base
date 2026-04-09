@@ -27,6 +27,10 @@ interface MyEndpoint {
   gasBudgetRaw: string;
   gasSharePct: number;
   proxyStats?: ProxyStats;
+  // Capacity controls stored off-chain in proxyStore. Undefined means the
+  // endpoint has no proxy config row yet (legacy / webpage-only endpoints).
+  maxConcurrent?: number;
+  paymentTimeoutSeconds?: number;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,6 +80,8 @@ export function ManageEndpoint() {
           gasBudgetRaw: ep.paymaster?.balanceRaw ?? "0",
           gasSharePct: ep.paymaster ? Math.round(ep.paymaster.gasShareBps / 100) : 0,
           proxyStats: ep.proxyStats ?? undefined,
+          maxConcurrent: ep.maxConcurrent,
+          paymentTimeoutSeconds: ep.paymentTimeoutSeconds,
         }));
 
       setMyEndpoints(results);
@@ -282,6 +288,8 @@ export function ManageEndpoint() {
                     ["revenue", `$${(ep.proxyStats?.totalRevenue ?? 0).toFixed(4)}`],
                     ["gas", ep.gasBudget !== "0" ? `${ep.gasBudget} ETH` : "---"],
                     ["sponsored", ep.gasSharePct > 0 ? `${ep.gasSharePct}%` : "---"],
+                    ["max ∥", ep.maxConcurrent !== undefined ? ep.maxConcurrent.toString() : "---"],
+                    ["timeout", ep.paymentTimeoutSeconds !== undefined ? `${ep.paymentTimeoutSeconds}s` : "---"],
                     ["since", ep.registeredAt.toLocaleDateString()],
                   ].map(([k, v]) => (
                     <div key={k} className="flex items-baseline gap-1.5">
