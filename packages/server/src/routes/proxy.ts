@@ -417,6 +417,10 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   }
 
   // 6. Verify payment via x402.org facilitator (only after backend pre-flight passes)
+  //    IMPORTANT: verify is purely validation — it does NOT move USDC.
+  //    The actual on-chain transfer happens later via facilitator.settle().
+  //    This two-phase flow lets us deliver-then-settle, so buyers never pay
+  //    for failed upstream calls.
   let paymentPayload: any;
   try {
     paymentPayload = JSON.parse(Buffer.from(paymentHeader, "base64").toString("utf-8"));
@@ -426,20 +430,75 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
 
   const amount         = usdToUsdcUnits(priceUsd);
   const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: paymentTimeoutSeconds, resource: c.req.url };
-  const verifyResult   = await facilitator.verify(paymentPayload, requirements as any);
 
-  if (!verifyResult.isValid) {
-    console.warn(`[proxy] Payment invalid for endpoint #${endpointId}: ${verifyResult.invalidReason}`);
-    return c.json({ error: `Payment invalid: ${verifyResult.invalidReason}` }, 402);
+  let verifyResult: any;
+  try {
+    verifyResult = await facilitator.verify(paymentPayload, requirements as any);
+  } catch (verifyErr: any) {
+    // VerifyError or network failure — surface as 402 with the reason, not
+    // 500. A malformed payload or missing x402Version lands here.
+    const reason = verifyErr?.invalidReason || verifyErr?.invalidMessage || verifyErr?.message || "unknown";
+    console.warn(`[proxy] Verify threw for endpoint #${endpointId}: ${reason}`);
+    return c.json({ error: `Payment verification failed: ${reason}` }, 402);
+  }
+
+  if (!verifyResult?.isValid) {
+    console.warn(`[proxy] Payment invalid for endpoint #${endpointId}: ${verifyResult?.invalidReason}`);
+    return c.json({ error: `Payment invalid: ${verifyResult?.invalidReason || "unknown"}` }, 402);
   }
 
   const platformFee = priceUsd * (PLATFORM_FEE_PCT / 100);
   const publisherNet = priceUsd - platformFee;
-  console.log(`[proxy] ✅ Payment verified for endpoint #${endpointId}: $${priceUsd} total → $${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform fee (${PLATFORM_FEE_PCT}%)`);
+  console.log(`[proxy] ✅ Payment authorized for endpoint #${endpointId}: $${priceUsd} total → $${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform (${PLATFORM_FEE_PCT}%) — will settle on delivery`);
+
+  // 7. Forward to upstream and BUFFER the complete response in memory.
+  //    forwardToUpstream already reads the body to arrayBuffer, so by the
+  //    time it returns the entire response is captured. We hold it here
+  //    and decide whether to actually deliver it based on settle success.
+  const upstreamResponse = await forwardToUpstream(c, proxyConfig, endpointId);
+
+  // 8. Delivery check — only settle if upstream actually succeeded.
+  //    Upstream 4xx/5xx means the buyer got no value → return the error
+  //    without settling, so the buyer is NOT charged.
+  if (upstreamResponse.status >= 400) {
+    console.warn(`[proxy] Upstream returned ${upstreamResponse.status} — NOT settling, buyer not charged`);
+    return upstreamResponse;
+  }
+
+  // 9. Settle the payment on-chain BEFORE returning the response to the buyer.
+  //    This is the security guarantee the user asked for: the buyer cannot
+  //    "receive the response and then cancel the payment", because they
+  //    never see the response until settle() has returned success.
+  //
+  //    The buffered response sits in memory during settlement (~0.5-2s).
+  //    If settle fails, we return an error to the buyer instead of the
+  //    response they paid for — the response is discarded. This is a
+  //    deliberate trade-off: publisher absorbs the work cost rather than
+  //    the buyer getting free inference.
+  let settleResult: any;
+  try {
+    settleResult = await facilitator.settle(paymentPayload, requirements as any);
+  } catch (settleErr: any) {
+    console.error(`[proxy] ❌ Settle THREW after successful upstream: ${settleErr.message}`);
+    return c.json({
+      error: "Payment settlement failed after service delivery. You were NOT charged. Please retry.",
+      details: settleErr.message,
+    }, 502);
+  }
+
+  if (!settleResult?.success) {
+    console.error(`[proxy] ❌ Settle returned failure: ${settleResult?.errorReason || "unknown"}`);
+    return c.json({
+      error: "Payment settlement failed. You were NOT charged. Please retry.",
+      details: settleResult?.errorReason || "unknown",
+    }, 402);
+  }
+
+  console.log(`[proxy] 💰 Settled #${endpointId}: tx ${settleResult.transaction} on ${settleResult.network}`);
   callTracker.record(endpointId, worldIdAddress || "unknown", false, priceUsd, PLATFORM_FEE_PCT);
 
-  // 7. Forward the actual request to upstream backend
-  return await forwardToUpstream(c, proxyConfig, endpointId);
+  // 10. Now — and only now — deliver the buffered response to the buyer.
+  return upstreamResponse;
 }
 
 export default router;
