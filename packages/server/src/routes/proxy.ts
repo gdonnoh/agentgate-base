@@ -44,6 +44,32 @@ function releaseSlot(endpointId: number): void {
   else inFlightByEndpoint.set(endpointId, cur - 1);
 }
 
+// ── Endpoint chain-read cache ────────────────────────────────────────────────
+// The proxy used to do a fresh viem readContract on Base Sepolia for every
+// incoming request, which added 500-1500ms of round-trip latency to every
+// paid call. Since endpoint price/active/publisher change rarely, we cache
+// the result in-memory with a short TTL. Trade-off: after a price change the
+// old price is served for up to TTL seconds — acceptable given the upside.
+interface EndpointCacheEntry {
+  priceUsd: number;
+  publisherAddress: `0x${string}`;
+  requireWorldId: boolean;
+  active: boolean;
+  cachedAt: number;
+}
+const endpointChainCache = new Map<number, EndpointCacheEntry>();
+const ENDPOINT_CACHE_TTL_MS = 15_000;
+
+function getCachedEndpoint(id: number): EndpointCacheEntry | null {
+  const entry = endpointChainCache.get(id);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > ENDPOINT_CACHE_TTL_MS) {
+    endpointChainCache.delete(id);
+    return null;
+  }
+  return entry;
+}
+
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
 const PLATFORM_WALLET = config.platformAddress as `0x${string}`;
@@ -171,22 +197,48 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
     proxyConfig.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS;
 
   // 2. Read endpoint from chain to get price + publisher address
+  //    Uses a short-lived in-memory cache to avoid a viem round-trip on
+  //    every single paid call — saves ~0.5-1.5s per request.
   let priceUsd = 0.01; // fallback (registry stores USD, 6 decimals)
   let publisherAddress = PLATFORM_WALLET;
   let onChainRequireWorldId = false;
-  try {
-    const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
-    const ep = await client.readContract({
-      address: REGISTRY, abi: REGISTRY_ABI,
-      functionName: "endpoints", args: [BigInt(endpointId)],
-    }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
 
-    if (!ep[5]) return c.json({ error: "Endpoint is inactive" }, 403);
-    priceUsd = Number(ep[3]) / 1_000_000;
-    publisherAddress = ep[1];
-    onChainRequireWorldId = ep[9]; // requireWorldId from contract
-  } catch (err: any) {
-    console.warn(`[proxy] Could not read endpoint #${endpointId} from chain:`, err.message);
+  const cached = getCachedEndpoint(endpointId);
+  if (cached) {
+    if (!cached.active) return c.json({ error: "Endpoint is inactive" }, 403);
+    priceUsd = cached.priceUsd;
+    publisherAddress = cached.publisherAddress;
+    onChainRequireWorldId = cached.requireWorldId;
+  } else {
+    try {
+      const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
+      const ep = await client.readContract({
+        address: REGISTRY, abi: REGISTRY_ABI,
+        functionName: "endpoints", args: [BigInt(endpointId)],
+      }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
+
+      const active = ep[5];
+      const freshPrice = Number(ep[3]) / 1_000_000;
+      const freshPublisher = ep[1];
+      const freshRequireWorldId = ep[9];
+
+      // Cache even inactive state — we still want to reject with 403 quickly
+      // on subsequent calls without another RPC hit.
+      endpointChainCache.set(endpointId, {
+        priceUsd: freshPrice,
+        publisherAddress: freshPublisher,
+        requireWorldId: freshRequireWorldId,
+        active,
+        cachedAt: Date.now(),
+      });
+
+      if (!active) return c.json({ error: "Endpoint is inactive" }, 403);
+      priceUsd = freshPrice;
+      publisherAddress = freshPublisher;
+      onChainRequireWorldId = freshRequireWorldId;
+    } catch (err: any) {
+      console.warn(`[proxy] Could not read endpoint #${endpointId} from chain:`, err.message);
+    }
   }
 
   // Use on-chain requireWorldId (falls back to proxyStore config)
