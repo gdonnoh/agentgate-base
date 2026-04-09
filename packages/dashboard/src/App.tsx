@@ -3,8 +3,9 @@ import { useOnChainData } from "./hooks/useOnChainData";
 import { EndpointTable } from "./components/EndpointTable";
 import { PublishForm } from "./components/PublishForm";
 import { ManageEndpoint } from "./components/ManageEndpoint";
+import { Guides } from "./components/Guides";
 
-type View = "publish" | "dashboard" | "manage";
+type View = "publish" | "dashboard" | "manage" | "guides";
 
 export default function App() {
   const [view, setView] = useState<View>("publish");
@@ -14,6 +15,7 @@ export default function App() {
     { id: "publish", label: "Publish" },
     { id: "dashboard", label: "Dashboard" },
     { id: "manage", label: "Manage" },
+    { id: "guides", label: "Guides" },
   ];
 
   return (
@@ -79,6 +81,7 @@ export default function App() {
             </div>
           )}
           {view === "manage" && <ManageEndpoint />}
+          {view === "guides" && <Guides onGoToPublish={() => setView("publish")} />}
         </div>
       </main>
 
