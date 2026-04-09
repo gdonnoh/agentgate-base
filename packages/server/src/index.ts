@@ -24,6 +24,7 @@ import pricesRouter from "./routes/prices";
 import publisherRouter from "./routes/publisher";
 import proxyRouter from "./routes/proxy";
 import dataRouter from "./routes/data";
+import { startLivenessChecker } from "./services/liveness";
 
 const payTo = config.publisherAddress as `0x${string}`;
 
@@ -219,6 +220,8 @@ serve(
     console.log(`   Verified agents → 3 free calls (free-trial), then USDC payment`);
     console.log(`   Wallet-only agents → USDC payment required (no free-trial)`);
     console.log(`💳 Payments to: ${payTo}\n`);
+    // Start periodic liveness probes for registered endpoints.
+    startLivenessChecker();
   }
 );
 }

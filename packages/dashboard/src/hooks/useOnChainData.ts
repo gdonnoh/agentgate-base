@@ -25,6 +25,16 @@ export interface EndpointProxyStats {
   publisherRevenue: number;
 }
 
+export interface EndpointLiveness {
+  currentStatus: "up" | "down" | "unknown";
+  lastCheckAt: number | null;
+  lastLatencyMs: number | null;
+  uptimePercent: number;
+  avgLatencyMs: number;
+  totalChecks: number;
+  okChecks: number;
+}
+
 export interface EndpointData {
   id: number;
   publisher: string;
@@ -40,6 +50,11 @@ export interface EndpointData {
   requireWorldId?: boolean;
   // Live proxy traffic stats (in-memory on the server, resets on restart)
   proxyStats?: EndpointProxyStats;
+  // Liveness probe results from the server's periodic checker
+  liveness?: EndpointLiveness;
+  // Current concurrent requests in-flight (0 = idle, >= maxConcurrent = saturated)
+  inFlight?: number;
+  maxConcurrent?: number;
 }
 
 const INITIAL: OnChainData = {
@@ -84,6 +99,9 @@ export function useOnChainData() {
           requireWorldId: ep.requireWorldId,
           proxyName: ep.name,
           proxyStats: ep.proxyStats,
+          liveness: ep.liveness,
+          inFlight: ep.inFlight ?? 0,
+          maxConcurrent: ep.maxConcurrent,
         }));
 
       // Aggregate "Total API Calls" from proxy stats — the on-chain paymaster

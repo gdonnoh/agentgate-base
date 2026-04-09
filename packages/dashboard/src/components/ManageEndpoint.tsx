@@ -15,6 +15,14 @@ interface ProxyStats {
   requireWorldId: boolean;
 }
 
+interface Liveness {
+  currentStatus: "up" | "down" | "unknown";
+  lastCheckAt: number | null;
+  lastLatencyMs: number | null;
+  uptimePercent: number;
+  totalChecks: number;
+}
+
 interface MyEndpoint {
   id: number;
   url: string;
@@ -31,6 +39,8 @@ interface MyEndpoint {
   // endpoint has no proxy config row yet (legacy / webpage-only endpoints).
   maxConcurrent?: number;
   paymentTimeoutSeconds?: number;
+  liveness?: Liveness;
+  inFlight?: number;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -82,6 +92,8 @@ export function ManageEndpoint() {
           proxyStats: ep.proxyStats ?? undefined,
           maxConcurrent: ep.maxConcurrent,
           paymentTimeoutSeconds: ep.paymentTimeoutSeconds,
+          liveness: ep.liveness ?? undefined,
+          inFlight: ep.inFlight ?? 0,
         }));
 
       setMyEndpoints(results);
@@ -264,7 +276,20 @@ export function ManageEndpoint() {
               >
                 {/* Top row: status + URL + manage button */}
                 <div className="flex items-start gap-2">
-                  <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${ep.active ? "bg-success" : "bg-text-muted"}`} />
+                  {(() => {
+                    const status = ep.liveness?.currentStatus ?? "unknown";
+                    const cls =
+                      !ep.active ? "bg-text-muted" :
+                      status === "up" ? "bg-success" :
+                      status === "down" ? "bg-error" :
+                      "bg-border-hover";
+                    const title =
+                      !ep.active ? "Inactive on-chain" :
+                      status === "up" ? `Up · ${ep.liveness?.lastLatencyMs ?? "—"}ms · ${ep.liveness?.uptimePercent}% uptime` :
+                      status === "down" ? "Down — liveness probe failed" :
+                      "No liveness data yet";
+                    return <span title={title} className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${cls}`} />;
+                  })()}
                   <span className="text-sm text-text-dim font-mono break-all leading-relaxed flex-1">
                     {ep.url}
                   </span>
@@ -286,9 +311,10 @@ export function ManageEndpoint() {
                     ["price", `$${ep.pricePerCall}/call`],
                     ["calls", (ep.proxyStats?.totalCalls ?? 0).toString()],
                     ["revenue", `$${(ep.proxyStats?.totalRevenue ?? 0).toFixed(4)}`],
+                    ["uptime", ep.liveness && ep.liveness.totalChecks > 0 ? `${ep.liveness.uptimePercent}%` : "---"],
+                    ["in-flight", ep.maxConcurrent !== undefined ? `${ep.inFlight ?? 0}/${ep.maxConcurrent}` : "---"],
                     ["gas", ep.gasBudget !== "0" ? `${ep.gasBudget} ETH` : "---"],
                     ["sponsored", ep.gasSharePct > 0 ? `${ep.gasSharePct}%` : "---"],
-                    ["max ∥", ep.maxConcurrent !== undefined ? ep.maxConcurrent.toString() : "---"],
                     ["timeout", ep.paymentTimeoutSeconds !== undefined ? `${ep.paymentTimeoutSeconds}s` : "---"],
                     ["since", ep.registeredAt.toLocaleDateString()],
                   ].map(([k, v]) => (

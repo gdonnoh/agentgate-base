@@ -44,6 +44,12 @@ function releaseSlot(endpointId: number): void {
   else inFlightByEndpoint.set(endpointId, cur - 1);
 }
 
+/** Read-only accessor used by the data routes so the dashboard can render a
+ *  "busy" / "ready" / "saturated" badge next to each endpoint. */
+export function getInFlightCount(endpointId: number): number {
+  return inFlightByEndpoint.get(endpointId) ?? 0;
+}
+
 // ── Endpoint chain-read cache ────────────────────────────────────────────────
 // The proxy used to do a fresh viem readContract on Base Sepolia for every
 // incoming request, which added 500-1500ms of round-trip latency to every

@@ -18,6 +18,8 @@ import {
 } from "viem";
 import { baseSepolia } from "viem/chains";
 import { callTracker, proxyStore } from "../services/proxyStore";
+import { getLivenessSummary } from "../services/liveness";
+import { getInFlightCount } from "./proxy";
 
 // ── Contract addresses ───────────────────────────────────────────────────────
 const REGISTRY_ADDR  = "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2" as const;
@@ -150,6 +152,8 @@ async function readEndpoint(id: number) {
   // direct x402 proxy calls bypass them, so we surface the proxy counter
   // alongside so the dashboard can aggregate real revenue.
   const proxyStats = callTracker.getStats(epId);
+  const liveness = getLivenessSummary(epId);
+  const inFlight = getInFlightCount(epId);
   return {
     id: epId,
     publisher:       raw[1],
@@ -170,6 +174,11 @@ async function readEndpoint(id: number) {
     paymentTimeoutSeconds:  proxyConfig?.paymentTimeoutSeconds,
     // Enriched from in-memory call tracker (resets on server restart)
     proxyStats,
+    // Enriched from in-memory liveness checker (resets on server restart)
+    liveness,
+    // Current in-flight count from the concurrency gate, for "busy"/"ready"
+    // computation in the dashboard.
+    inFlight,
   };
 }
 

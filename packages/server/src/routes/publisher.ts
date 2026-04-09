@@ -11,6 +11,7 @@ import {
   MIN_PAYMENT_TIMEOUT_SECONDS,
   MAX_PAYMENT_TIMEOUT_SECONDS,
 } from "../services/proxyStore";
+import { getLivenessSummary, probeEndpointNow } from "../services/liveness";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
@@ -308,6 +309,33 @@ router.get("/proxy-config/:endpointId", (c) => {
     paymentTimeoutSeconds: config.paymentTimeoutSeconds,
     proxyUrl:       `/api/proxy/${config.endpointId}`,
   });
+});
+
+/**
+ * GET /api/publisher/liveness/:endpointId
+ * Returns the latest liveness probe results for an endpoint (up/down,
+ * uptime %, recent check history). The server runs probes on a timer
+ * so this is just reading from an in-memory ring buffer — cheap.
+ */
+router.get("/liveness/:endpointId", (c) => {
+  const id = parseInt(c.req.param("endpointId"));
+  if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
+  return c.json(getLivenessSummary(id));
+});
+
+/**
+ * POST /api/publisher/liveness/:endpointId/check-now
+ * Forces an immediate probe of this endpoint. Useful for a "Check now"
+ * button in the dashboard so publishers don't wait for the next tick.
+ * Intentionally open (no signature required) — it only does a HEAD fetch
+ * against the backend URL already on file, no state mutation beyond
+ * appending to the ring buffer.
+ */
+router.post("/liveness/:endpointId/check-now", async (c) => {
+  const id = parseInt(c.req.param("endpointId"));
+  if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
+  const summary = await probeEndpointNow(id);
+  return c.json(summary);
 });
 
 /**
