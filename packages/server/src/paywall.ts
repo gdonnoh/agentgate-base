@@ -11,13 +11,19 @@ interface PaywallOptions {
   priceUsd: number;
   usdcAmount: string;      // in 6-decimal units
   payTo: string;
-  backendUrl: string;      // just for display (host)
+  backendUrl: string;      // just for display (host), ONLY rendered in api mode
   requireWorldId: boolean;
   proxyUrl: string;        // the full proxy URL agents would call
+  contentType: "webpage" | "api";
 }
 
 export function paywallHtml(opts: PaywallOptions): string {
-  const host = (() => { try { return new URL(opts.backendUrl).hostname; } catch { return opts.backendUrl; } })();
+  // In webpage mode the backend URL IS the product the buyer is paying to
+  // unlock — showing even the hostname here would give the answer away for
+  // free. Hide it entirely and let the endpoint name stand alone.
+  const host = opts.contentType === "webpage"
+    ? ""
+    : (() => { try { return new URL(opts.backendUrl).hostname; } catch { return opts.backendUrl; } })();
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -307,7 +313,7 @@ export function paywallHtml(opts: PaywallOptions): string {
 <div class="card">
   <div class="brand"><span class="brand-mark">◆</span> AgentGate</div>
   <h1>${escapeHtml(opts.endpointName)}</h1>
-  <p class="host">${escapeHtml(host)}</p>
+  ${host ? `<p class="host">${escapeHtml(host)}</p>` : ""}
 
   ${opts.requireWorldId ? `
   <div class="worldid-badge">

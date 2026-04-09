@@ -383,15 +383,28 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
       const proto = forwardedProto || (host.includes("localhost") ? "http" : "https");
       const absUrl = `${proto}://${host}${c.req.path}`;
 
+      // For webpage endpoints we also override the displayed name: the
+      // stored `name` field may be the backend hostname (auto-derived at
+      // publish time on older versions of the form), which would also
+      // leak the URL. Fall back to "Endpoint #N" whenever the stored name
+      // happens to include a dot — that's a strong signal it's a hostname.
+      const isWebpageMode = proxyConfig.contentType === "webpage";
+      const storedName = proxyConfig.name || "";
+      const displayName =
+        isWebpageMode && /\./.test(storedName)
+          ? `Endpoint #${endpointId}`
+          : storedName || `Endpoint #${endpointId}`;
+
       const html = paywallHtml({
         endpointId,
-        endpointName: proxyConfig.name || `Endpoint #${endpointId}`,
+        endpointName: displayName,
         priceUsd,
         usdcAmount: amount,
         payTo: PLATFORM_WALLET,
         backendUrl: proxyConfig.backendUrl,
         requireWorldId,
         proxyUrl: absUrl,
+        contentType: proxyConfig.contentType,
       });
       c.header("Content-Type", "text/html; charset=utf-8");
       return c.body(html, 402);

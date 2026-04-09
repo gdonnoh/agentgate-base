@@ -273,11 +273,13 @@ export function EndpointTable({ endpoints, loading }: Props) {
                 {/* Liveness dot (replaces the on-chain active dot) */}
                 <LivenessDot ep={ep} />
 
-                {/* Name / URL */}
+                {/* Name / URL — proxyName is redacted for public view, fall
+                    back to a neutral label so we never accidentally expose
+                    a backend hostname in the first line. */}
                 <div className="min-w-0">
-                  {ep.proxyName && (
-                    <div className="text-xs font-semibold text-text truncate">{ep.proxyName}</div>
-                  )}
+                  <div className="text-xs font-semibold text-text truncate">
+                    {ep.proxyName || `Endpoint #${ep.id}`}
+                  </div>
                   <div className="text-xs text-text-dim font-mono truncate">{ep.url}</div>
                 </div>
 

@@ -149,6 +149,21 @@ function getStaleCached<T>(entry: CacheEntry<T> | null): T | null {
   return entry.data;
 }
 
+/**
+ * Strip fields that must NEVER leave the server for public callers.
+ *
+ * `backendUrl` and `name` (which is the backend hostname) are private to the
+ * publisher — for webpage endpoints they ARE the product: buyers pay to learn
+ * the URL. Showing them in /api/data/overview would give away the entire value
+ * proposition for free. The Manage tab fetches /api/data/publisher/:address
+ * instead, which returns the full object including these fields — the publisher
+ * sees their own data because they own it.
+ */
+function redactPrivateEndpointFields(ep: any) {
+  const { backendUrl, name, hasProxy, ...rest } = ep;
+  return rest;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Read a single endpoint from the registry by ID */
@@ -287,7 +302,9 @@ async function buildOverview() {
     },
     registry: { address: REGISTRY_ADDR, endpointCount },
     gasPrice: { wei: gasPrice.toString(), gwei: Number(gasPrice) / 1e9 },
-    endpoints,
+    // Strip backend URL + hostname from the public listing. The Manage tab
+    // uses /publisher/:address which returns the full objects.
+    endpoints: endpoints.map(redactPrivateEndpointFields),
     timestamp: Date.now(),
   };
 }
@@ -447,9 +464,11 @@ dataRouter.get("/endpoint-by-url", async (c) => {
       console.warn(`[data/endpoint-by-url] Paymaster read failed:`, e.message);
     }
 
-    // proxyStats is already attached by readEndpoint().
+    // This route is public (anyone can look up by on-chain URL), so the
+    // backend URL and hostname must be redacted. proxyStats is already
+    // attached by readEndpoint().
     return c.json({
-      ...match,
+      ...redactPrivateEndpointFields(match),
       paymaster: paymasterData,
     });
   } catch (err: any) {

@@ -256,11 +256,15 @@ export function PublishForm() {
             method: "personal_sign",
             params: [message, wallet.state.address],
           });
+          // In webpage mode the endpoint name must NOT leak the backend
+          // hostname — the whole pay-to-unlock model depends on the URL
+          // being secret. Let the backend default to "Endpoint #N" instead.
+          const publicName = contentType === "webpage" ? undefined : (endpointName || undefined);
           const res = await fetch(`${SERVER}/api/publisher/proxy-config`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
-              endpointId, name: endpointName || undefined,
+              endpointId, name: publicName,
               backendUrl: backendUrl.trim(),
               injectHeaders, requireWorldId,
               maxConcurrent,
