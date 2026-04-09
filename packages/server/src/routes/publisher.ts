@@ -233,6 +233,10 @@ router.post("/proxy-config", async (c) => {
     contentType,
   });
 
+  // Re-publishing an endpoint the publisher had previously hidden or
+  // deleted should bring it back into view. Clear any hidden flag.
+  hiddenEndpoints.unhide(Number(endpointId), walletAddress.toLowerCase());
+
   console.log(`[proxy-config] ✅ Endpoint #${endpointId} → ${backendUrl} (verified, by ${walletAddress})`);
 
   return c.json({
@@ -292,8 +296,18 @@ router.delete("/proxy-config/:endpointId", async (c) => {
   }
 
   proxyStore.delete(id);
-  console.log(`[proxy-config] 🗑  Endpoint #${id} proxy deactivated by ${walletAddress}`);
-  return c.json({ success: true, message: `Proxy for endpoint #${id} deactivated.` });
+  // Delete is more than "hide": the proxy_config row is gone, so any call
+  // to /api/proxy/id returns 404. We ALSO mark the endpoint as hidden so
+  // it disappears from the publisher's Manage list and the public Dashboard.
+  // Re-publishing via POST /proxy-config un-hides it automatically.
+  hiddenEndpoints.hide(id, walletAddress.toLowerCase());
+  console.log(`[proxy-config] 🗑  Endpoint #${id} proxy deleted (and hidden) by ${walletAddress}`);
+  return c.json({
+    success: true,
+    deleted: true,
+    hidden: true,
+    message: `Proxy for endpoint #${id} deleted. The on-chain registry entry still exists but /api/proxy/${id} now returns 404. Re-publish from the form to bring it back.`,
+  });
 });
 
 /**

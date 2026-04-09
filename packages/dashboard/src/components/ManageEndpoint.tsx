@@ -68,6 +68,7 @@ export function ManageEndpoint() {
   const [showHidden, setShowHidden] = useState(false);
   const [hidingId, setHidingId] = useState<number | null>(null);
   const [hideError, setHideError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const netData = NETWORKS[NET];
   const paymasterAddr = DEPLOYMENTS[NET].paymaster;
@@ -118,6 +119,51 @@ export function ManageEndpoint() {
       setMyEndpoints([]);
     }
   }, [wallet.state.connected, wallet.state.address, fetchMyEndpoints]);
+
+  // ── Delete an endpoint (kill switch) ──────────────────────────────────────
+  // Removes the proxy_config on the server so /api/proxy/:id returns 404 for
+  // everyone, and auto-hides the endpoint from the Manage list. The on-chain
+  // PublisherRegistry entry is untouched (we can't remove it without a gas tx
+  // and setActive isn't wired into the contract yet). Re-publish via the
+  // Publish form to bring the endpoint back.
+  async function deleteEndpoint(ep: MyEndpoint) {
+    if (!wallet.state.address) return;
+    const ok = window.confirm(
+      `DELETE endpoint #${ep.id}?\n\n` +
+      `This stops the proxy from serving ANY calls — including buyers who ` +
+      `already have the URL. They will start getting 404 errors.\n\n` +
+      `The on-chain registry entry will still exist (no gas spent). ` +
+      `To bring the endpoint back, re-publish it from the Publish tab.\n\n` +
+      `This action cannot be undone.`
+    );
+    if (!ok) return;
+    setDeletingId(ep.id);
+    setHideError(null);
+    try {
+      const timestamp = Date.now();
+      const message = `AgentGate deactivate proxy\nendpointId: ${ep.id}\ntimestamp: ${timestamp}`;
+      const signature = await (window as any).ethereum.request({
+        method: "personal_sign",
+        params: [message, wallet.state.address],
+      });
+      const res = await fetch(`${SERVER_URL}/api/publisher/proxy-config/${ep.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: wallet.state.address,
+          signature,
+          timestamp,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      await fetchMyEndpoints(wallet.state.address);
+    } catch (e: any) {
+      setHideError(e?.shortMessage || e?.message || String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   // ── Hide / unhide an endpoint ─────────────────────────────────────────────
   async function toggleHidden(ep: MyEndpoint) {
@@ -374,13 +420,21 @@ export function ManageEndpoint() {
                   </span>
                   <button
                     onClick={() => toggleHidden(ep)}
-                    disabled={hidingId === ep.id}
+                    disabled={hidingId === ep.id || deletingId === ep.id}
                     title={ep.hidden
                       ? "Un-hide this endpoint (will appear in Manage + public Dashboard again)"
-                      : "Hide this endpoint from Manage and the public Dashboard"}
+                      : "Hide this endpoint from Manage and the public Dashboard (reversible, proxy still serves)"}
                     className="shrink-0 text-xs font-mono px-2 py-1 rounded-sm border bg-transparent text-text-muted border-border hover:text-warning hover:border-warning/30 transition-all duration-150 disabled:opacity-50"
                   >
                     {hidingId === ep.id ? "..." : ep.hidden ? "Unhide" : "Hide"}
+                  </button>
+                  <button
+                    onClick={() => deleteEndpoint(ep)}
+                    disabled={deletingId === ep.id || hidingId === ep.id}
+                    title="DELETE: removes the proxy config — /api/proxy/:id will return 404 for everyone. On-chain entry remains. Re-publish to restore."
+                    className="shrink-0 text-xs font-mono px-2 py-1 rounded-sm border bg-transparent text-text-muted border-border hover:text-error hover:border-error/30 transition-all duration-150 disabled:opacity-50"
+                  >
+                    {deletingId === ep.id ? "..." : "Delete"}
                   </button>
                   <button
                     onClick={() => isManaging ? closeManage() : openManage(ep)}
