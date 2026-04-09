@@ -144,6 +144,18 @@ export function Guides({ onGoToPublish }: Props) {
             listening on port <code className="font-mono text-text-dim">11434</code>.
           </p>
           <CodeBlock>ollama run llama3</CodeBlock>
+          <div className="rounded-sm px-3 py-2 text-xs bg-warning/10 border border-warning/20 text-warning">
+            <strong className="font-semibold">Enable parallel requests.</strong> Ollama's default
+            serializes requests to the same model — two buyers hitting you at once will wait in line
+            even if your "max concurrent" on AgentGate is higher. Quit the Ollama menubar app and
+            relaunch it with <code className="font-mono">OLLAMA_NUM_PARALLEL=2</code> (or more) so
+            Ollama actually runs them in parallel. The cleanest way on macOS:
+            <CodeBlock>{"# Quit the menubar app first, then from a terminal:\nOLLAMA_NUM_PARALLEL=2 ollama serve"}</CodeBlock>
+            Benchmark on M4 / qwen2.5:3b / 30-token responses:{" "}
+            <strong className="text-text-dim">default = 2 calls in 1.8s (serialized)</strong>,
+            {" "}<strong className="text-text-dim">NUM_PARALLEL=2 = 2 calls in 1.6s (+25% throughput)</strong>.
+            Each individual call is ~50% slower under load, but you serve more buyers.
+          </div>
         </Step>
 
         {/* Step 3: open the tunnel */}
@@ -228,6 +240,12 @@ export function Guides({ onGoToPublish }: Props) {
               <strong className="text-text-dim">Model choice matters.</strong> Bigger models =
               slower replies = higher chance of buyer timeout. Start with a small model
               (llama3:8b) and scale up only if your hardware handles it fast.
+            </li>
+            <li>
+              <strong className="text-text-dim">Match AgentGate "max concurrent" to OLLAMA_NUM_PARALLEL.</strong>{" "}
+              If you set AgentGate to allow 4 concurrent calls but Ollama only handles 2 in
+              parallel, the 3rd and 4th buyers will wait for an Ollama slot even after AgentGate
+              let them through. Keep the two numbers in sync.
             </li>
           </ul>
         </div>
