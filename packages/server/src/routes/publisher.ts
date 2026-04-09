@@ -6,10 +6,12 @@ import {
   callTracker,
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+  DEFAULT_CONTENT_TYPE,
   MIN_MAX_CONCURRENT,
   MAX_MAX_CONCURRENT,
   MIN_PAYMENT_TIMEOUT_SECONDS,
   MAX_PAYMENT_TIMEOUT_SECONDS,
+  type ContentType,
 } from "../services/proxyStore";
 import { getLivenessSummary, probeEndpointNow } from "../services/liveness";
 
@@ -211,6 +213,11 @@ router.post("/proxy-config", async (c) => {
     ? Math.min(MAX_PAYMENT_TIMEOUT_SECONDS, Math.max(MIN_PAYMENT_TIMEOUT_SECONDS, Math.floor(paymentTimeoutRaw)))
     : DEFAULT_PAYMENT_TIMEOUT_SECONDS;
 
+  const contentType: ContentType =
+    body.contentType === "webpage" ? "webpage" :
+    body.contentType === "api"     ? "api" :
+    DEFAULT_CONTENT_TYPE;
+
   // 6. Store proxy config
   proxyStore.set({
     endpointId:     Number(endpointId),
@@ -222,6 +229,7 @@ router.post("/proxy-config", async (c) => {
     registeredAt:   new Date(),
     maxConcurrent,
     paymentTimeoutSeconds,
+    contentType,
   });
 
   console.log(`[proxy-config] ✅ Endpoint #${endpointId} → ${backendUrl} (verified, by ${walletAddress})`);
@@ -307,6 +315,7 @@ router.get("/proxy-config/:endpointId", (c) => {
     registeredAt:   config.registeredAt,
     maxConcurrent:  config.maxConcurrent,
     paymentTimeoutSeconds: config.paymentTimeoutSeconds,
+    contentType:    config.contentType,
     proxyUrl:       `/api/proxy/${config.endpointId}`,
   });
 });

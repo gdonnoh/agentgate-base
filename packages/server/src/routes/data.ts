@@ -187,6 +187,9 @@ async function readEndpoint(id: number) {
     // Capacity controls — set by publisher, enforced by the proxy route
     maxConcurrent:          proxyConfig?.maxConcurrent,
     paymentTimeoutSeconds:  proxyConfig?.paymentTimeoutSeconds,
+    // What the publisher is selling — drives whether the dashboard
+    // surfaces capacity/timeout controls (api) or hides them (webpage)
+    contentType:            proxyConfig?.contentType,
     // Enriched from in-memory call tracker (resets on server restart)
     proxyStats,
     // Enriched from in-memory liveness checker (resets on server restart)

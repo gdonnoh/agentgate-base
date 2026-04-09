@@ -16,6 +16,10 @@ const PRESETS: { id: Preset; label: string; hint: string }[] = [
   { id: "all",      label: "All",      hint: "No filter" },
 ];
 
+function isWebpage(ep: EndpointData): boolean {
+  return ep.contentType === "webpage";
+}
+
 function isOffline(ep: EndpointData): boolean {
   // On-chain inactive OR liveness probe says down.
   if (!ep.active) return true;
@@ -26,6 +30,9 @@ function isOffline(ep: EndpointData): boolean {
 function isReady(ep: EndpointData): boolean {
   if (isOffline(ep)) return false;
   if (ep.liveness?.currentStatus !== "up") return false;
+  // Webpage endpoints don't have real concurrency — if they're up, they're
+  // ready. Only API endpoints can "run out of slots".
+  if (isWebpage(ep)) return true;
   const cap = ep.maxConcurrent ?? 1;
   const cur = ep.inFlight ?? 0;
   return cur < cap;
@@ -33,6 +40,8 @@ function isReady(ep: EndpointData): boolean {
 
 function isBusy(ep: EndpointData): boolean {
   if (isOffline(ep)) return false;
+  // A webpage can never be "busy" — it just redirects, no upstream to saturate.
+  if (isWebpage(ep)) return false;
   const cap = ep.maxConcurrent ?? 1;
   const cur = ep.inFlight ?? 0;
   // "Busy" = at least half-loaded, or fully saturated
@@ -84,6 +93,18 @@ function LivenessDot({ ep }: { ep: EndpointData }) {
 }
 
 function UtilizationBadge({ ep }: { ep: EndpointData }) {
+  // Webpage endpoints have no upstream forwarding, so slots are meaningless.
+  // Show a simple "link" pill instead of a fake utilization number.
+  if (isWebpage(ep)) {
+    return (
+      <span
+        className="text-[9px] font-mono px-1.5 py-0.5 rounded-sm border bg-surface border-border text-text-muted whitespace-nowrap"
+        title="Webpage endpoint — pay-to-unlock URL, no concurrency limits"
+      >
+        link
+      </span>
+    );
+  }
   const cap = ep.maxConcurrent ?? 1;
   const cur = ep.inFlight ?? 0;
   if (cap === 0) return null;

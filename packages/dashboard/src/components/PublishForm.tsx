@@ -265,6 +265,7 @@ export function PublishForm() {
               injectHeaders, requireWorldId,
               maxConcurrent,
               paymentTimeoutSeconds,
+              contentType,
               walletAddress: wallet.state.address,
               signature, timestamp,
             }),

@@ -55,6 +55,9 @@ export interface EndpointData {
   // Current concurrent requests in-flight (0 = idle, >= maxConcurrent = saturated)
   inFlight?: number;
   maxConcurrent?: number;
+  // "webpage" = pay-to-unlock URL, no concurrency limits apply.
+  // "api"     = pay-per-call, maxConcurrent + timeout enforced.
+  contentType?: "webpage" | "api";
 }
 
 const INITIAL: OnChainData = {
@@ -102,6 +105,7 @@ export function useOnChainData() {
           liveness: ep.liveness,
           inFlight: ep.inFlight ?? 0,
           maxConcurrent: ep.maxConcurrent,
+          contentType: ep.contentType,
         }));
 
       // Aggregate "Total API Calls" from proxy stats — the on-chain paymaster

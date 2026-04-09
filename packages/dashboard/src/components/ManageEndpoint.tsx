@@ -41,6 +41,7 @@ interface MyEndpoint {
   paymentTimeoutSeconds?: number;
   liveness?: Liveness;
   inFlight?: number;
+  contentType?: "webpage" | "api";
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -94,6 +95,7 @@ export function ManageEndpoint() {
           paymentTimeoutSeconds: ep.paymentTimeoutSeconds,
           liveness: ep.liveness ?? undefined,
           inFlight: ep.inFlight ?? 0,
+          contentType: ep.contentType,
         }));
 
       setMyEndpoints(results);
@@ -305,25 +307,34 @@ export function ManageEndpoint() {
                   </button>
                 </div>
 
-                {/* Stats row */}
-                <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3">
-                  {[
+                {/* Stats row — hide in-flight/timeout for webpages where they don't apply */}
+                {(() => {
+                  const isWebpage = ep.contentType === "webpage";
+                  const entries: [string, string][] = [
                     ["price", `$${ep.pricePerCall}/call`],
+                    ["mode", isWebpage ? "webpage" : "api"],
                     ["calls", (ep.proxyStats?.totalCalls ?? 0).toString()],
                     ["revenue", `$${(ep.proxyStats?.totalRevenue ?? 0).toFixed(4)}`],
                     ["uptime", ep.liveness && ep.liveness.totalChecks > 0 ? `${ep.liveness.uptimePercent}%` : "---"],
-                    ["in-flight", ep.maxConcurrent !== undefined ? `${ep.inFlight ?? 0}/${ep.maxConcurrent}` : "---"],
-                    ["gas", ep.gasBudget !== "0" ? `${ep.gasBudget} ETH` : "---"],
-                    ["sponsored", ep.gasSharePct > 0 ? `${ep.gasSharePct}%` : "---"],
-                    ["timeout", ep.paymentTimeoutSeconds !== undefined ? `${ep.paymentTimeoutSeconds}s` : "---"],
-                    ["since", ep.registeredAt.toLocaleDateString()],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex items-baseline gap-1.5">
-                      <span className="label text-[10px]">{k}</span>
-                      <span className="text-xs font-mono text-text-dim">{v}</span>
+                  ];
+                  if (!isWebpage) {
+                    entries.push(["in-flight", ep.maxConcurrent !== undefined ? `${ep.inFlight ?? 0}/${ep.maxConcurrent}` : "---"]);
+                    entries.push(["timeout", ep.paymentTimeoutSeconds !== undefined ? `${ep.paymentTimeoutSeconds}s` : "---"]);
+                  }
+                  entries.push(["gas", ep.gasBudget !== "0" ? `${ep.gasBudget} ETH` : "---"]);
+                  entries.push(["sponsored", ep.gasSharePct > 0 ? `${ep.gasSharePct}%` : "---"]);
+                  entries.push(["since", ep.registeredAt.toLocaleDateString()]);
+                  return (
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3">
+                      {entries.map(([k, v]) => (
+                        <div key={k} className="flex items-baseline gap-1.5">
+                          <span className="label text-[10px]">{k}</span>
+                          <span className="text-xs font-mono text-text-dim">{v}</span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  );
+                })()}
 
                 {/* Proxy stats badge row */}
                 {ep.proxyStats && (ep.proxyStats.totalCalls > 0 || ep.proxyStats.requireWorldId) && (

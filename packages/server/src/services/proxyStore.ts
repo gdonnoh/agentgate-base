@@ -14,6 +14,8 @@
 import * as fs from "fs";
 import * as path from "path";
 
+export type ContentType = "webpage" | "api";
+
 export interface ProxyConfig {
   endpointId:      number;
   name:            string;
@@ -26,6 +28,14 @@ export interface ProxyConfig {
   maxConcurrent:   number;
   /** Seconds the x402 payment challenge is valid for — longer is needed for slow AI backends. */
   paymentTimeoutSeconds: number;
+  /**
+   * "webpage" = proxy returns a redirect to backendUrl after payment (no
+   *             upstream forwarding, no concurrency concerns, no timeout).
+   * "api"     = proxy fetches backendUrl with the caller's method/body and
+   *             streams the response back; concurrency + timeout matter.
+   * Drives what the dashboard surfaces to the publisher.
+   */
+  contentType:     ContentType;
 }
 
 export const DEFAULT_MAX_CONCURRENT = 3;
@@ -34,6 +44,7 @@ export const MIN_PAYMENT_TIMEOUT_SECONDS = 10;
 export const MAX_PAYMENT_TIMEOUT_SECONDS = 300;
 export const MIN_MAX_CONCURRENT = 1;
 export const MAX_MAX_CONCURRENT = 100;
+export const DEFAULT_CONTENT_TYPE: ContentType = "api";
 
 // ── Call tracking (persisted to Postgres if POSTGRES_URL is set) ─────────────
 //
@@ -168,6 +179,10 @@ async function initPostgres() {
       `ALTER TABLE proxy_configs
          ADD COLUMN IF NOT EXISTS payment_timeout_seconds INTEGER NOT NULL DEFAULT ${DEFAULT_PAYMENT_TIMEOUT_SECONDS}`
     );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS content_type TEXT NOT NULL DEFAULT '${DEFAULT_CONTENT_TYPE}'`
+    );
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS proxy_calls (
         id            BIGSERIAL PRIMARY KEY,
@@ -197,6 +212,7 @@ async function initPostgres() {
         registeredAt:   new Date(row.registered_at),
         maxConcurrent:  row.max_concurrent ?? DEFAULT_MAX_CONCURRENT,
         paymentTimeoutSeconds: row.payment_timeout_seconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+        contentType:    (row.content_type === "webpage" ? "webpage" : "api") as ContentType,
       };
       cache.set(config.endpointId, config);
     }
@@ -258,15 +274,17 @@ async function pgSet(config: ProxyConfig) {
   await pgPool.query(
     `INSERT INTO proxy_configs
        (endpoint_id, name, backend_url, inject_headers, publisher_addr,
-        require_world_id, registered_at, max_concurrent, payment_timeout_seconds)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        require_world_id, registered_at, max_concurrent, payment_timeout_seconds,
+        content_type)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
        publisher_addr = $5, require_world_id = $6, registered_at = $7,
-       max_concurrent = $8, payment_timeout_seconds = $9`,
+       max_concurrent = $8, payment_timeout_seconds = $9,
+       content_type = $10`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
      config.publisherAddr, config.requireWorldId, config.registeredAt,
-     config.maxConcurrent, config.paymentTimeoutSeconds]
+     config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType]
   );
 }
 
@@ -296,6 +314,7 @@ function loadFromFile() {
           // Back-fill defaults for configs saved before these fields existed.
           maxConcurrent:  raw.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
           paymentTimeoutSeconds: raw.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+          contentType:    (raw.contentType === "webpage" ? "webpage" : DEFAULT_CONTENT_TYPE),
         };
         cache.set(config.endpointId, config);
       }
