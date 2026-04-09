@@ -42,6 +42,10 @@ interface MyEndpoint {
   liveness?: Liveness;
   inFlight?: number;
   contentType?: "webpage" | "api";
+  pricingModel?: "per-call" | "per-token";
+  pricePerMillionTokens?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
   hidden?: boolean;
 }
 
@@ -101,6 +105,10 @@ export function ManageEndpoint() {
           liveness: ep.liveness ?? undefined,
           inFlight: ep.inFlight ?? 0,
           contentType: ep.contentType,
+          pricingModel: ep.pricingModel,
+          pricePerMillionTokens: ep.pricePerMillionTokens,
+          maxInputTokens: ep.maxInputTokens,
+          maxOutputTokens: ep.maxOutputTokens,
           hidden: ep.hidden ?? false,
         }));
 
@@ -451,9 +459,14 @@ export function ManageEndpoint() {
                 {/* Stats row — hide in-flight/timeout for webpages where they don't apply */}
                 {(() => {
                   const isWebpage = ep.contentType === "webpage";
+                  const isPerToken = ep.pricingModel === "per-token";
+                  // Build the "price" cell based on the pricing model.
+                  const priceCell = isPerToken
+                    ? `$${ep.pricePerMillionTokens ?? "?"}/1M ≤${ep.maxInputTokens ?? 0}+${ep.maxOutputTokens ?? 0}tok`
+                    : `$${ep.pricePerCall}/call`;
                   const entries: [string, string][] = [
-                    ["price", `$${ep.pricePerCall}/call`],
-                    ["mode", isWebpage ? "webpage" : "api"],
+                    ["price", priceCell],
+                    ["mode", isWebpage ? "webpage" : isPerToken ? "api · per-token" : "api · per-call"],
                     ["calls", (ep.proxyStats?.totalCalls ?? 0).toString()],
                     ["revenue", `$${(ep.proxyStats?.totalRevenue ?? 0).toFixed(4)}`],
                     ["uptime", ep.liveness && ep.liveness.totalChecks > 0 ? `${ep.liveness.uptimePercent}%` : "---"],

@@ -58,6 +58,12 @@ export interface EndpointData {
   // "webpage" = pay-to-unlock URL, no concurrency limits apply.
   // "api"     = pay-per-call, maxConcurrent + timeout enforced.
   contentType?: "webpage" | "api";
+  // "per-call"  = flat price from on-chain registry
+  // "per-token" = budget-based: max price = (maxInput + maxOutput)/1M × rate
+  pricingModel?: "per-call" | "per-token";
+  pricePerMillionTokens?: number;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
 }
 
 const INITIAL: OnChainData = {
@@ -106,6 +112,10 @@ export function useOnChainData() {
           inFlight: ep.inFlight ?? 0,
           maxConcurrent: ep.maxConcurrent,
           contentType: ep.contentType,
+          pricingModel: ep.pricingModel,
+          pricePerMillionTokens: ep.pricePerMillionTokens,
+          maxInputTokens: ep.maxInputTokens,
+          maxOutputTokens: ep.maxOutputTokens,
         }));
 
       // Aggregate "Total API Calls" from proxy stats — the on-chain paymaster

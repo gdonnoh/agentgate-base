@@ -205,6 +205,12 @@ async function readEndpoint(id: number) {
     // What the publisher is selling — drives whether the dashboard
     // surfaces capacity/timeout controls (api) or hides them (webpage)
     contentType:            proxyConfig?.contentType,
+    // Pricing model + per-token fields — lets the dashboard render the
+    // right price label ("$X/call" vs "up to $Y/call based on tokens").
+    pricingModel:           proxyConfig?.pricingModel,
+    pricePerMillionTokens:  proxyConfig?.pricePerMillionTokens,
+    maxInputTokens:         proxyConfig?.maxInputTokens,
+    maxOutputTokens:        proxyConfig?.maxOutputTokens,
     // Enriched from in-memory call tracker (resets on server restart)
     proxyStats,
     // Enriched from in-memory liveness checker (resets on server restart)

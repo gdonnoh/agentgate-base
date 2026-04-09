@@ -8,11 +8,18 @@ import {
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
   DEFAULT_CONTENT_TYPE,
+  DEFAULT_PRICING_MODEL,
+  DEFAULT_PRICE_PER_MILLION_TOKENS,
+  DEFAULT_MAX_INPUT_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_ALLOWED_INPUT_TOKENS,
+  MAX_ALLOWED_OUTPUT_TOKENS,
   MIN_MAX_CONCURRENT,
   MAX_MAX_CONCURRENT,
   MIN_PAYMENT_TIMEOUT_SECONDS,
   MAX_PAYMENT_TIMEOUT_SECONDS,
   type ContentType,
+  type PricingModel,
 } from "../services/proxyStore";
 import { getLivenessSummary, probeEndpointNow } from "../services/liveness";
 
@@ -219,6 +226,33 @@ router.post("/proxy-config", async (c) => {
     body.contentType === "api"     ? "api" :
     DEFAULT_CONTENT_TYPE;
 
+  // Per-token pricing fields — only meaningful when pricingModel is "per-token".
+  // We clamp rather than reject so older clients that don't know about the new
+  // fields still publish successfully with defaults.
+  const pricingModel: PricingModel =
+    body.pricingModel === "per-token" ? "per-token" : DEFAULT_PRICING_MODEL;
+
+  let pricePerMillionTokens: number | undefined;
+  let maxInputTokens: number | undefined;
+  let maxOutputTokens: number | undefined;
+
+  if (pricingModel === "per-token") {
+    const rawPrice = Number(body.pricePerMillionTokens);
+    pricePerMillionTokens = Number.isFinite(rawPrice) && rawPrice > 0
+      ? Math.min(10000, rawPrice) // hard cap at $10k/1M tokens — anything higher is a typo
+      : DEFAULT_PRICE_PER_MILLION_TOKENS;
+
+    const rawMaxIn = Number(body.maxInputTokens);
+    maxInputTokens = Number.isFinite(rawMaxIn) && rawMaxIn > 0
+      ? Math.min(MAX_ALLOWED_INPUT_TOKENS, Math.max(1, Math.floor(rawMaxIn)))
+      : DEFAULT_MAX_INPUT_TOKENS;
+
+    const rawMaxOut = Number(body.maxOutputTokens);
+    maxOutputTokens = Number.isFinite(rawMaxOut) && rawMaxOut > 0
+      ? Math.min(MAX_ALLOWED_OUTPUT_TOKENS, Math.max(1, Math.floor(rawMaxOut)))
+      : DEFAULT_MAX_OUTPUT_TOKENS;
+  }
+
   // 6. Store proxy config
   proxyStore.set({
     endpointId:     Number(endpointId),
@@ -231,6 +265,10 @@ router.post("/proxy-config", async (c) => {
     maxConcurrent,
     paymentTimeoutSeconds,
     contentType,
+    pricingModel,
+    pricePerMillionTokens,
+    maxInputTokens,
+    maxOutputTokens,
   });
 
   // Re-publishing an endpoint the publisher had previously hidden or
@@ -420,6 +458,10 @@ router.get("/proxy-config/:endpointId", (c) => {
     maxConcurrent:  config.maxConcurrent,
     paymentTimeoutSeconds: config.paymentTimeoutSeconds,
     contentType:    config.contentType,
+    pricingModel:   config.pricingModel,
+    pricePerMillionTokens: config.pricePerMillionTokens,
+    maxInputTokens:  config.maxInputTokens,
+    maxOutputTokens: config.maxOutputTokens,
     proxyUrl:       `/api/proxy/${config.endpointId}`,
   });
 });

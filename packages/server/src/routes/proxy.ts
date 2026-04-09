@@ -18,6 +18,9 @@ import {
   proxyStore,
   callTracker,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+  DEFAULT_MAX_INPUT_TOKENS,
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  DEFAULT_PRICE_PER_MILLION_TOKENS,
 } from "../services/proxyStore";
 import { validateAgentKitHeader } from "../services/agentkit";
 import { config, USDC_ADDRESS } from "../config";
@@ -116,10 +119,23 @@ const facilitator = new HTTPFacilitatorClient({ url: "https://www.x402.org/facil
 
 const router = new Hono();
 
-/** Forward the request to the upstream backend (shared by free-trial + paid paths) */
-async function forwardToUpstream(c: any, proxyConfig: any, endpointId: number): Promise<Response> {
+/** Forward the request to the upstream backend (shared by free-trial + paid paths).
+ *
+ * @param bodyOverride - Optional pre-read/mutated body buffer. When the
+ *   caller has already consumed `c.req.arrayBuffer()` (e.g. to inject
+ *   num_predict for per-token endpoints) it passes the resulting buffer
+ *   here so we don't try to read the request stream a second time.
+ */
+async function forwardToUpstream(
+  c: any,
+  proxyConfig: any,
+  endpointId: number,
+  bodyOverride?: ArrayBuffer | Uint8Array,
+): Promise<Response> {
   const method     = c.req.method;
-  const bodyBuffer = method !== "GET" && method !== "HEAD" ? await c.req.arrayBuffer() : undefined;
+  const bodyBuffer = bodyOverride !== undefined
+    ? bodyOverride
+    : (method !== "GET" && method !== "HEAD" ? await c.req.arrayBuffer() : undefined);
 
   const upstreamHeaders: Record<string, string> = {};
   const ct = c.req.header("content-type");
@@ -156,6 +172,71 @@ async function forwardToUpstream(c: any, proxyConfig: any, endpointId: number): 
  */
 function usdToUsdcUnits(usdAmount: number): string {
   return Math.ceil(usdAmount * 1_000_000).toString();
+}
+
+/**
+ * Estimate the number of input tokens from a chat/generate request body.
+ *
+ * For the common LLM API shapes (Ollama /api/chat, OpenAI chat completions,
+ * Anthropic messages) the token-bearing content lives inside a `messages[]`
+ * array or a `prompt` string. We sum just those content strings and divide
+ * by 4 — the rough rule of thumb for English. This is NOT exact (ideograms,
+ * emoji, and code all vary) but it is a defensible budget estimate for
+ * pricing — the publisher also sets a hard `maxInputTokens` cap, so the
+ * worst-case exposure is bounded.
+ *
+ * When the body can't be parsed as JSON or has an unknown shape, we fall
+ * back to `rawLen / 4` which over-counts tokens slightly. That is fine for
+ * billing because it makes the buyer pay MORE than they strictly owe — the
+ * proxy can't accidentally under-charge.
+ */
+function estimateInputTokens(parsedBody: any, rawText: string): number {
+  const CHARS_PER_TOKEN = 4;
+  try {
+    if (parsedBody && Array.isArray(parsedBody.messages)) {
+      // Chat-shaped body (Ollama + OpenAI + Anthropic all use this)
+      let chars = 0;
+      for (const m of parsedBody.messages) {
+        if (typeof m?.content === "string") chars += m.content.length;
+        // Anthropic uses content as an array of parts
+        else if (Array.isArray(m?.content)) {
+          for (const part of m.content) {
+            if (typeof part?.text === "string") chars += part.text.length;
+          }
+        }
+      }
+      if (typeof parsedBody.system === "string") chars += parsedBody.system.length;
+      return Math.ceil(chars / CHARS_PER_TOKEN);
+    }
+    if (parsedBody && typeof parsedBody.prompt === "string") {
+      // Generate-shaped body (Ollama /api/generate, OpenAI completions)
+      return Math.ceil(parsedBody.prompt.length / CHARS_PER_TOKEN);
+    }
+  } catch {
+    /* fall through */
+  }
+  return Math.ceil(rawText.length / CHARS_PER_TOKEN);
+}
+
+/**
+ * Pull actual token usage from a non-streaming upstream response body.
+ * Supports the three major shapes:
+ *   - Ollama   : { prompt_eval_count, eval_count }
+ *   - OpenAI   : { usage: { prompt_tokens, completion_tokens } }
+ *   - Anthropic: { usage: { input_tokens, output_tokens } }
+ *
+ * Returns null if no usage is present or the body isn't JSON.
+ */
+function parseUsageFromResponse(bodyText: string): { input: number; output: number } | null {
+  try {
+    const d = JSON.parse(bodyText);
+    const input  = d?.prompt_eval_count ?? d?.usage?.prompt_tokens ?? d?.usage?.input_tokens;
+    const output = d?.eval_count        ?? d?.usage?.completion_tokens ?? d?.usage?.output_tokens;
+    if (typeof input === "number" && typeof output === "number") {
+      return { input, output };
+    }
+  } catch { /* non-JSON or unexpected shape */ }
+  return null;
 }
 
 // ── GET or POST /api/proxy/:endpointId[/*] ─────────────────────────────────
@@ -249,6 +330,67 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
 
   // Use on-chain requireWorldId (falls back to proxyStore config)
   const requireWorldId = onChainRequireWorldId || proxyConfig.requireWorldId;
+
+  // ── Per-token pricing pre-processing ──────────────────────────────────────
+  // When the endpoint uses the per-token pricing model, we OVERRIDE priceUsd
+  // with a budget derived from (estimated input tokens + maxOutputTokens).
+  // We also read the request body once, inject a num_predict cap to enforce
+  // the output budget upstream, and pass the mutated body to forwardToUpstream.
+  //
+  // This runs BEFORE payment verification because the 402 challenge must
+  // advertise the correct amount to the buyer. For non-JSON or non-chat
+  // bodies the override falls back to raw-length estimation.
+  const isPerToken = proxyConfig.pricingModel === "per-token";
+  let upstreamBodyOverride: Uint8Array | undefined;
+  let estimatedInputTokens = 0;
+  const perTokenMaxOutput = proxyConfig.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const perTokenMaxInput  = proxyConfig.maxInputTokens  ?? DEFAULT_MAX_INPUT_TOKENS;
+  const perTokenRate      = proxyConfig.pricePerMillionTokens ?? DEFAULT_PRICE_PER_MILLION_TOKENS;
+
+  if (isPerToken && c.req.method !== "GET" && c.req.method !== "HEAD") {
+    try {
+      const rawBuf = await c.req.arrayBuffer();
+      const rawText = new TextDecoder().decode(rawBuf);
+      let parsed: any = null;
+      try { parsed = JSON.parse(rawText); } catch { /* non-JSON body */ }
+
+      estimatedInputTokens = estimateInputTokens(parsed, rawText);
+      if (estimatedInputTokens > perTokenMaxInput) {
+        return c.json({
+          error: `Input too large: ~${estimatedInputTokens} estimated tokens exceeds this endpoint's cap of ${perTokenMaxInput}. Shorten your prompt or messages.`,
+          estimatedInputTokens,
+          maxInputTokens: perTokenMaxInput,
+        }, 413);
+      }
+
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        // Inject output cap. We support the two dominant shapes:
+        //   Ollama / OpenAI-compatible: `options.num_predict`
+        //   OpenAI chat completions:    `max_tokens`
+        //   Anthropic messages:         `max_tokens`
+        const opts = parsed.options = parsed.options || {};
+        const requestedOpts = typeof opts.num_predict === "number" ? opts.num_predict : perTokenMaxOutput;
+        opts.num_predict = Math.min(requestedOpts, perTokenMaxOutput);
+        if (typeof parsed.max_tokens === "number") {
+          parsed.max_tokens = Math.min(parsed.max_tokens, perTokenMaxOutput);
+        }
+        upstreamBodyOverride = new TextEncoder().encode(JSON.stringify(parsed));
+      } else {
+        upstreamBodyOverride = new Uint8Array(rawBuf);
+      }
+
+      // Override priceUsd with the token-budget-based amount.
+      const maxTotalTokens = estimatedInputTokens + perTokenMaxOutput;
+      priceUsd = (maxTotalTokens / 1_000_000) * perTokenRate;
+      console.log(
+        `[proxy] 💰 per-token #${endpointId}: ~${estimatedInputTokens} in + up to ${perTokenMaxOutput} out ` +
+        `@ $${perTokenRate}/1M = $${priceUsd.toFixed(6)} max`
+      );
+    } catch (err: any) {
+      console.warn(`[proxy] per-token pre-read failed for #${endpointId}:`, err?.message || err);
+      // Fall through with on-chain priceUsd — safer than 500ing the caller
+    }
+  }
 
   // 3. WorldID verification + free-trial (only for endpoints that require WorldID)
   const agentkitHeader = c.req.header("agentkit") ?? c.req.header("AGENTKIT");
@@ -474,7 +616,9 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   //    forwardToUpstream already reads the body to arrayBuffer, so by the
   //    time it returns the entire response is captured. We hold it here
   //    and decide whether to actually deliver it based on settle success.
-  const upstreamResponse = await forwardToUpstream(c, proxyConfig, endpointId);
+  //    For per-token endpoints we pass the pre-mutated body (with the
+  //    injected num_predict cap) so the upstream can't exceed the budget.
+  const upstreamResponse = await forwardToUpstream(c, proxyConfig, endpointId, upstreamBodyOverride);
 
   // 8. Delivery check — only settle if upstream actually succeeded.
   //    Upstream 4xx/5xx means the buyer got no value → return the error
@@ -516,7 +660,41 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   console.log(`[proxy] 💰 Settled #${endpointId}: tx ${settleResult.transaction} on ${settleResult.network}`);
   callTracker.record(endpointId, worldIdAddress || "unknown", false, priceUsd, PLATFORM_FEE_PCT);
 
-  // 10. Now — and only now — deliver the buffered response to the buyer.
+  // 10. For per-token endpoints, peek at the response body to extract ACTUAL
+  //     token usage (prompt_eval_count / eval_count for Ollama, usage.* for
+  //     OpenAI/Anthropic). We log the delta vs the budget the buyer paid for.
+  //     This is observability only — the buyer has already paid the MAX
+  //     because we're on the `exact` scheme. When we later migrate to `upto`
+  //     with a self-hosted facilitator, these numbers become the settle amount.
+  //
+  //     Reading the body consumes the Response stream, so we rebuild a fresh
+  //     Response with the same bytes/status/headers for the buyer.
+  if (isPerToken) {
+    try {
+      const bodyText = await upstreamResponse.text();
+      const usage = parseUsageFromResponse(bodyText);
+      if (usage) {
+        const actualPrice = ((usage.input + usage.output) / 1_000_000) * perTokenRate;
+        const overpay = priceUsd - actualPrice;
+        console.log(
+          `[proxy] 📊 #${endpointId} actual usage: ${usage.input} in + ${usage.output} out = ` +
+          `$${actualPrice.toFixed(6)} real (buyer paid $${priceUsd.toFixed(6)} max, ` +
+          `$${overpay.toFixed(6)} overpay margin)`
+        );
+      } else {
+        console.log(`[proxy] 📊 #${endpointId} no usage field in response (non-JSON or unknown shape)`);
+      }
+      return new Response(bodyText, {
+        status: upstreamResponse.status,
+        headers: Object.fromEntries(upstreamResponse.headers.entries()),
+      });
+    } catch (err: any) {
+      console.warn(`[proxy] per-token usage parse failed for #${endpointId}:`, err?.message || err);
+      // If we can't parse/reconstruct, fall through to the default path.
+    }
+  }
+
+  // 11. Now — and only now — deliver the buffered response to the buyer.
   return upstreamResponse;
 }
 

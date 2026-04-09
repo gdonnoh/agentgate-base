@@ -265,6 +265,12 @@ export function EndpointTable({ endpoints, loading }: Props) {
           {/* Rows */}
           {filtered.map((ep) => {
             const paidCalls = ep.proxyStats?.totalCalls ?? 0;
+            const isPerToken = ep.pricingModel === "per-token";
+            // For per-token endpoints, compute the max price from the budget
+            // rather than showing the on-chain price (which is a placeholder).
+            const maxPerTokenCost = isPerToken && ep.pricePerMillionTokens && ep.maxInputTokens && ep.maxOutputTokens
+              ? (((ep.maxInputTokens + ep.maxOutputTokens) / 1_000_000) * ep.pricePerMillionTokens).toFixed(6)
+              : null;
             return (
               <div
                 key={ep.id}
@@ -277,15 +283,23 @@ export function EndpointTable({ endpoints, loading }: Props) {
                     back to a neutral label so we never accidentally expose
                     a backend hostname in the first line. */}
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-text truncate">
+                  <div className="text-xs font-semibold text-text truncate flex items-center gap-1.5">
                     {ep.proxyName || `Endpoint #${ep.id}`}
+                    {isPerToken && (
+                      <span className="badge-accent text-[9px] shrink-0">per-token</span>
+                    )}
                   </div>
                   <div className="text-xs text-text-dim font-mono truncate">{ep.url}</div>
                 </div>
 
-                {/* Price */}
-                <span className="text-xs text-text-dim font-mono whitespace-nowrap">
-                  ${ep.pricePerCall}
+                {/* Price — flat for per-call, "up to $X" for per-token */}
+                <span
+                  className="text-xs text-text-dim font-mono whitespace-nowrap"
+                  title={isPerToken
+                    ? `$${ep.pricePerMillionTokens}/1M tokens × max ${(ep.maxInputTokens ?? 0) + (ep.maxOutputTokens ?? 0)} = max cost`
+                    : undefined}
+                >
+                  {isPerToken && maxPerTokenCost ? `≤$${maxPerTokenCost}` : `$${ep.pricePerCall}`}
                 </span>
 
                 {/* Paid calls (from proxyStats, not on-chain which is 0) */}

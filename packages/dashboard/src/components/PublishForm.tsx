@@ -57,6 +57,12 @@ export function PublishForm() {
   const [requireWorldId,  setRequireWorldId]  = useState(false);
   const [maxConcurrent,   setMaxConcurrent]   = useState(3);
   const [paymentTimeoutSeconds, setPaymentTimeoutSeconds] = useState(60);
+  // Pricing model: flat per-call (existing behavior, uses on-chain price)
+  // or per-token (buyer pays up to max budget based on token counts).
+  const [pricingModel, setPricingModel] = useState<"per-call" | "per-token">("per-call");
+  const [pricePerMillionTokens, setPricePerMillionTokens] = useState(10);
+  const [maxInputTokens,  setMaxInputTokens]  = useState(4000);
+  const [maxOutputTokens, setMaxOutputTokens] = useState(1000);
   const [proxyDone,       setProxyDone]       = useState<string | null>(null);
   const [proxyError,      setProxyError]      = useState<string | null>(null);
 
@@ -270,6 +276,12 @@ export function PublishForm() {
               maxConcurrent,
               paymentTimeoutSeconds,
               contentType,
+              pricingModel,
+              // Only sent when pricingModel === "per-token" — the server
+              // ignores these fields for "per-call" endpoints.
+              pricePerMillionTokens: pricingModel === "per-token" ? pricePerMillionTokens : undefined,
+              maxInputTokens:        pricingModel === "per-token" ? maxInputTokens        : undefined,
+              maxOutputTokens:       pricingModel === "per-token" ? maxOutputTokens       : undefined,
               walletAddress: wallet.state.address,
               signature, timestamp,
             }),
@@ -443,21 +455,166 @@ export function PublishForm() {
         </div>
       )}
 
-      {/* ── Price ── */}
-      <div className="flex flex-col gap-1.5">
-        <label className="label">Price per call</label>
-        <div className="flex items-center gap-2">
-          <span className="text-text-muted text-lg">$</span>
-          <input
-            type="number"
-            min="0"
-            step="0.001"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-            className="input w-28 text-center font-mono"
-          />
-          <span className="text-sm text-text-muted font-sans">per call (paid in USDC)</span>
+      {/* ── Pricing ── */}
+      <div className="flex flex-col gap-3">
+        <div>
+          <label className="label">Pricing model</label>
+          <p className="text-xs text-text-muted mt-1">
+            Flat per call is simplest. Per token charges based on usage — buyers pay a
+            maximum capped by your input+output budget, and the dashboard logs the
+            delta between budgeted and actual tokens.
+          </p>
         </div>
+
+        {/* Mode radio — webpage endpoints always use flat per-call */}
+        {contentType === "api" && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setPricingModel("per-call")}
+                className={`card flex items-start gap-3 text-left cursor-pointer transition-colors ${
+                  pricingModel === "per-call" ? "border-accent bg-accent-dim" : "hover:border-border-hover"
+                }`}
+              >
+                <span className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${
+                  pricingModel === "per-call" ? "border-accent" : "border-border-hover"
+                }`}>
+                  {pricingModel === "per-call" && <span className="w-2 h-2 rounded-full bg-accent" />}
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-text font-sans">Flat per call</span>
+                    <span className="text-[9px] text-success font-mono">AGENTS PREFER</span>
+                  </div>
+                  <div className="text-xs text-text-muted font-sans mt-0.5">One fixed price, same amount whether the call is short or long.</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPricingModel("per-token")}
+                className={`card flex items-start gap-3 text-left cursor-pointer transition-colors ${
+                  pricingModel === "per-token" ? "border-accent bg-accent-dim" : "hover:border-border-hover"
+                }`}
+              >
+                <span className={`mt-0.5 w-4 h-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${
+                  pricingModel === "per-token" ? "border-accent" : "border-border-hover"
+                }`}>
+                  {pricingModel === "per-token" && <span className="w-2 h-2 rounded-full bg-accent" />}
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-text font-sans">Per token</span>
+                    <span className="badge-accent text-[10px]">LLM</span>
+                  </div>
+                  <div className="text-xs text-text-muted font-sans mt-0.5">Price scales with input+output tokens, capped at a max budget per call.</div>
+                </div>
+              </button>
+            </div>
+
+            {/* Pricing model trade-off cheat-sheet */}
+            <div className="rounded-sm px-3 py-2 text-xs bg-bg border border-border text-text-muted leading-relaxed">
+              <strong className="text-text-dim">Which should you pick?</strong>
+              {" "}
+              <strong className="text-success">Flat per call</strong> is simpler and typically
+              looks cheaper to buyers — same low price every time, so agents that make many
+              small calls flock to it. You overcharge for long conversations and undercharge
+              for long ones. Use it when your workload has consistent size (short answers,
+              reformatting, classification).
+              {" "}
+              <strong className="text-accent">Per token</strong> scales with actual work and
+              protects you against abuse (someone pasting a huge document and asking a 5-word
+              question). Buyers see a max-budget cap per call, which is less predictable —
+              price-sensitive agents may skip your endpoint in favor of a flat-rate one. Use
+              it when workload varies a lot (open-ended chat, RAG, code-gen).
+            </div>
+          </>
+        )}
+
+        {/* Flat price input (always shown for webpage, conditional for api) */}
+        {(contentType === "webpage" || pricingModel === "per-call") && (
+          <div className="flex items-center gap-2">
+            <span className="text-text-muted text-lg">$</span>
+            <input
+              type="number"
+              min="0"
+              step="0.001"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+              className="input w-28 text-center font-mono"
+            />
+            <span className="text-sm text-text-muted font-sans">per call (paid in USDC)</span>
+          </div>
+        )}
+
+        {/* Per-token budget configuration */}
+        {contentType === "api" && pricingModel === "per-token" && (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex flex-col gap-1 flex-1">
+                <label className="label text-[10px]">Price per 1M tokens (USD)</label>
+                <div className="flex items-center gap-2">
+                  <span className="text-text-muted text-sm">$</span>
+                  <input
+                    type="number"
+                    min={0.01}
+                    step={0.5}
+                    value={pricePerMillionTokens}
+                    onChange={(e) => setPricePerMillionTokens(Math.max(0.01, Number(e.target.value) || 10))}
+                    className="input w-24 text-center font-mono"
+                  />
+                  <span className="text-xs text-text-muted font-sans">per 1M</span>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1 flex-1">
+                <label className="label text-[10px]">Max input tokens</label>
+                <input
+                  type="number"
+                  min={100}
+                  max={32000}
+                  step={100}
+                  value={maxInputTokens}
+                  onChange={(e) => setMaxInputTokens(Math.max(100, Math.min(32000, Number(e.target.value) || 4000)))}
+                  className="input w-24 text-center font-mono"
+                />
+              </div>
+              <div className="flex flex-col gap-1 flex-1">
+                <label className="label text-[10px]">Max output tokens</label>
+                <input
+                  type="number"
+                  min={10}
+                  max={8000}
+                  step={100}
+                  value={maxOutputTokens}
+                  onChange={(e) => setMaxOutputTokens(Math.max(10, Math.min(8000, Number(e.target.value) || 1000)))}
+                  className="input w-24 text-center font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Live preview of the max price */}
+            {(() => {
+              const maxTotal = maxInputTokens + maxOutputTokens;
+              const maxCost = (maxTotal / 1_000_000) * pricePerMillionTokens;
+              return (
+                <div className="rounded-sm px-3 py-2 text-xs bg-accent-dim border border-accent/20 text-accent font-mono">
+                  Max cost per call: {maxTotal.toLocaleString()} tokens × ${pricePerMillionTokens}/1M = <strong>${maxCost.toFixed(6)}</strong>
+                </div>
+              );
+            })()}
+
+            <div className="rounded-sm px-3 py-2 text-xs bg-bg border border-border text-text-muted">
+              <strong className="text-text-dim">How it works:</strong> the proxy estimates input
+              tokens from your request body (≈ chars/4), rejects calls over{" "}
+              <code className="font-mono text-text-dim">{maxInputTokens.toLocaleString()}</code>{" "}
+              input tokens, injects{" "}
+              <code className="font-mono text-text-dim">options.num_predict = {maxOutputTokens}</code>{" "}
+              to cap the output, and bills the buyer the MAX budget above. Actual token usage
+              is parsed from the response and logged for observability (future upgrade: pay
+              only actual tokens via <code className="font-mono">upto</code> scheme).
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Human Verification ── */}

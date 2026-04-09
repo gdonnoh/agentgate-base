@@ -16,6 +16,20 @@ import * as path from "path";
 
 export type ContentType = "webpage" | "api";
 
+/**
+ * "per-call"  = flat price per request (the on-chain registry price is used)
+ * "per-token" = token-budget pricing. Publisher sets USD/1M tokens + max
+ *               input/output caps. Server computes the max possible cost
+ *               per call (inputTokens * rate + maxOutputTokens * rate) and
+ *               charges that via the existing "exact" x402 scheme. Actual
+ *               usage (parsed from the response body) is recorded alongside
+ *               the charged amount in stats so publishers can see delta.
+ *               This is NOT true per-token billing — buyers pay the max
+ *               budget regardless of actual usage. True partial settlement
+ *               needs the UptoEvmScheme and a self-hosted facilitator wallet.
+ */
+export type PricingModel = "per-call" | "per-token";
+
 export interface ProxyConfig {
   endpointId:      number;
   name:            string;
@@ -36,6 +50,14 @@ export interface ProxyConfig {
    * Drives what the dashboard surfaces to the publisher.
    */
   contentType:     ContentType;
+  /** Pricing model — flat per call or token-budget. */
+  pricingModel:    PricingModel;
+  /** USD per 1,000,000 tokens (input+output pooled). Only used when pricingModel === "per-token". */
+  pricePerMillionTokens?: number;
+  /** Max input tokens allowed per request (approximated as body length / 4). */
+  maxInputTokens?: number;
+  /** Max output tokens (injected as num_predict in the upstream body). */
+  maxOutputTokens?: number;
 }
 
 export const DEFAULT_MAX_CONCURRENT = 3;
@@ -45,6 +67,15 @@ export const MAX_PAYMENT_TIMEOUT_SECONDS = 300;
 export const MIN_MAX_CONCURRENT = 1;
 export const MAX_MAX_CONCURRENT = 100;
 export const DEFAULT_CONTENT_TYPE: ContentType = "api";
+export const DEFAULT_PRICING_MODEL: PricingModel = "per-call";
+// Sensible defaults for per-token mode. Tuned for small models on consumer
+// hardware running via the public quick-tunnel — aggressive caps keep each
+// call inside the ~100s cloudflared upstream timeout.
+export const DEFAULT_PRICE_PER_MILLION_TOKENS = 10;   // USD per 1M tokens
+export const DEFAULT_MAX_INPUT_TOKENS          = 4000;
+export const DEFAULT_MAX_OUTPUT_TOKENS         = 1000;
+export const MAX_ALLOWED_INPUT_TOKENS          = 32000;
+export const MAX_ALLOWED_OUTPUT_TOKENS         = 8000;
 
 // ── Call tracking (persisted to Postgres if POSTGRES_URL is set) ─────────────
 //
@@ -188,6 +219,24 @@ async function initPostgres() {
       `ALTER TABLE proxy_configs
          ADD COLUMN IF NOT EXISTS content_type TEXT NOT NULL DEFAULT '${DEFAULT_CONTENT_TYPE}'`
     );
+    // Per-token pricing fields. NULLABLE because per-call endpoints (the
+    // default) don't use them at all.
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS pricing_model TEXT NOT NULL DEFAULT '${DEFAULT_PRICING_MODEL}'`
+    );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS price_per_million_tokens DOUBLE PRECISION`
+    );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS max_input_tokens INTEGER`
+    );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER`
+    );
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS proxy_calls (
         id            BIGSERIAL PRIMARY KEY,
@@ -231,6 +280,10 @@ async function initPostgres() {
         maxConcurrent:  row.max_concurrent ?? DEFAULT_MAX_CONCURRENT,
         paymentTimeoutSeconds: row.payment_timeout_seconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
         contentType:    (row.content_type === "webpage" ? "webpage" : "api") as ContentType,
+        pricingModel:   (row.pricing_model === "per-token" ? "per-token" : "per-call") as PricingModel,
+        pricePerMillionTokens: row.price_per_million_tokens ?? undefined,
+        maxInputTokens:  row.max_input_tokens ?? undefined,
+        maxOutputTokens: row.max_output_tokens ?? undefined,
       };
       cache.set(config.endpointId, config);
     }
@@ -302,16 +355,20 @@ async function pgSet(config: ProxyConfig) {
     `INSERT INTO proxy_configs
        (endpoint_id, name, backend_url, inject_headers, publisher_addr,
         require_world_id, registered_at, max_concurrent, payment_timeout_seconds,
-        content_type)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        content_type, pricing_model, price_per_million_tokens,
+        max_input_tokens, max_output_tokens)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
        publisher_addr = $5, require_world_id = $6, registered_at = $7,
        max_concurrent = $8, payment_timeout_seconds = $9,
-       content_type = $10`,
+       content_type = $10, pricing_model = $11, price_per_million_tokens = $12,
+       max_input_tokens = $13, max_output_tokens = $14`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
      config.publisherAddr, config.requireWorldId, config.registeredAt,
-     config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType]
+     config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType,
+     config.pricingModel, config.pricePerMillionTokens ?? null,
+     config.maxInputTokens ?? null, config.maxOutputTokens ?? null]
   );
 }
 
@@ -342,6 +399,10 @@ function loadFromFile() {
           maxConcurrent:  raw.maxConcurrent ?? DEFAULT_MAX_CONCURRENT,
           paymentTimeoutSeconds: raw.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS,
           contentType:    (raw.contentType === "webpage" ? "webpage" : DEFAULT_CONTENT_TYPE),
+          pricingModel:   (raw.pricingModel === "per-token" ? "per-token" : DEFAULT_PRICING_MODEL),
+          pricePerMillionTokens: raw.pricePerMillionTokens,
+          maxInputTokens:  raw.maxInputTokens,
+          maxOutputTokens: raw.maxOutputTokens,
         };
         cache.set(config.endpointId, config);
       }
