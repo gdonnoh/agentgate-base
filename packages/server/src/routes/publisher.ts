@@ -118,6 +118,69 @@ router.get("/endpoints/:address", (c) => {
 });
 
 /**
+ * POST /api/publisher/test-backend
+ *
+ * Lightweight backend reachability check. The dashboard calls this BEFORE
+ * publishing so the user knows their backend URL works BEFORE paying the
+ * 1 USDC on-chain fee. The server does the HEAD from its side (not the
+ * browser) to avoid CORS issues and to test the SAME network path the
+ * proxy will use later.
+ *
+ * Body: { backendUrl: string, injectHeaders?: Record<string, string> }
+ * No wallet signature needed — this is a read-only health probe.
+ */
+router.post("/test-backend", async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { backendUrl, injectHeaders } = body;
+  if (!backendUrl || typeof backendUrl !== "string") {
+    return c.json({ error: "Missing backendUrl" }, 400);
+  }
+
+  // Validate URL format
+  try { new URL(backendUrl); } catch {
+    return c.json({ error: `Invalid URL: "${backendUrl}". Must start with https:// or http://` }, 400);
+  }
+
+  const t0 = Date.now();
+  try {
+    const testHeaders: Record<string, string> = {};
+    if (injectHeaders && typeof injectHeaders === "object") {
+      for (const [k, v] of Object.entries(injectHeaders)) {
+        testHeaders[k.toLowerCase()] = String(v);
+      }
+    }
+    const res = await fetch(backendUrl, {
+      method: "HEAD",
+      headers: testHeaders,
+      signal: AbortSignal.timeout(10000),
+    });
+    const latencyMs = Date.now() - t0;
+    // 4xx = server is responsive (auth issues are fine for a health check)
+    // 5xx = genuinely broken
+    if (res.status >= 500) {
+      return c.json({
+        error: `Backend returned HTTP ${res.status}. The server is up but returning an error.`,
+        status: res.status,
+        latencyMs,
+      }, 422);
+    }
+    return c.json({ ok: true, status: res.status, latencyMs });
+  } catch (err: any) {
+    const latencyMs = Date.now() - t0;
+    return c.json({
+      error: err?.name === "TimeoutError"
+        ? `Backend timed out after 10s. Is the URL correct and the service running?`
+        : `Backend unreachable: ${err?.message || err}`,
+      latencyMs,
+    }, 422);
+  }
+});
+
+/**
  * POST /api/publisher/proxy-config
  *
  * Registers a backend proxy for an on-chain endpoint.

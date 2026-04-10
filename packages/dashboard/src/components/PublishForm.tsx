@@ -103,6 +103,11 @@ export function PublishForm() {
   }
 
   // ── Test endpoint ─────────────────────────────────────────────────────────
+  // Two-phase check:
+  //   Phase 1: is the AgentGate server itself reachable?
+  //   Phase 2: is the publisher's backend URL reachable FROM the server?
+  //            (the server does the HEAD, not the browser — avoids CORS)
+  // Both must pass for the Test to go green and the Publish button to unlock.
   async function handleTest() {
     setTesting(true);
     setTestResult(null);
@@ -110,7 +115,9 @@ export function PublishForm() {
     setPublishError(null);
     const t0 = Date.now();
 
-    if (!backendUrl.trim()) {
+    // Basic client-side URL validation first
+    const trimmedBackend = backendUrl.trim();
+    if (!trimmedBackend) {
       setTesting(false);
       setTestResult({
         ok: false, status: 0, statusText: "—", latencyMs: 0, contentType: null, bodyPreview: "",
@@ -118,20 +125,75 @@ export function PublishForm() {
       });
       return;
     }
-    try {
-      const res = await fetch(healthCheckUrl(), { signal: AbortSignal.timeout(8000) });
-      const latencyMs   = Date.now() - t0;
-      const contentType = res.headers.get("content-type");
-      const ok          = res.status === 200;
-      let bodyPreview   = "";
-      try {
-        bodyPreview = ok
-          ? `AgentGate server OK (${publicAgentGateBase()}).\n\nOn-chain URL: ${url.trim() || "(loading...)"}\nBackend: ${backendUrl.trim()}\n\nAfter publish, agents pay x402 and AgentGate forwards to your backend with injected headers.`
-          : await res.text();
-      } catch { bodyPreview = ""; }
+    try { new URL(trimmedBackend); } catch {
+      setTesting(false);
       setTestResult({
-        ok, status: res.status, statusText: res.statusText, latencyMs, contentType, bodyPreview,
-        errorMsg: ok ? undefined : `Health check failed — is the server running? (${res.status})`,
+        ok: false, status: 0, statusText: "—", latencyMs: 0, contentType: null, bodyPreview: "",
+        errorMsg: `"${trimmedBackend}" is not a valid URL. It must start with https:// (or http:// for local dev).`,
+      });
+      return;
+    }
+
+    try {
+      // Phase 1: AgentGate server health
+      const healthRes = await fetch(healthCheckUrl(), { signal: AbortSignal.timeout(8000) });
+      if (healthRes.status !== 200) {
+        const latencyMs = Date.now() - t0;
+        setTestResult({
+          ok: false, status: healthRes.status, statusText: healthRes.statusText, latencyMs,
+          contentType: null, bodyPreview: "",
+          errorMsg: `AgentGate server health check failed (${healthRes.status}). Is the server running?`,
+        });
+        return;
+      }
+
+      // Phase 2: Ask the server to verify the backend URL is reachable.
+      // We POST to the health-check-backend route which does a HEAD from the
+      // server side (so we don't hit CORS issues from the browser). If the
+      // server doesn't have this route, fall through with a warning.
+      const SERVER = import.meta.env.VITE_SERVER_URL || "http://localhost:4021";
+      let backendOk = true;
+      let backendMsg = "";
+      try {
+        // Build auth headers sample for the test (API mode may need them)
+        const testHeaders: Record<string, string> = {};
+        if (contentType === "api") {
+          for (const row of headerRows) {
+            if (row.key.trim()) testHeaders[row.key.trim()] = row.val.trim();
+          }
+        }
+        const backendRes = await fetch(`${SERVER}/api/publisher/test-backend`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ backendUrl: trimmedBackend, injectHeaders: testHeaders }),
+          signal: AbortSignal.timeout(12000),
+        });
+        const backendData = await backendRes.json().catch(() => ({})) as any;
+        if (!backendRes.ok || backendData.error) {
+          backendOk = false;
+          backendMsg = backendData.error || `Backend check returned ${backendRes.status}`;
+        } else {
+          backendMsg = `Backend reachable (HTTP ${backendData.status}, ${backendData.latencyMs}ms)`;
+        }
+      } catch (backendErr: any) {
+        // If the route doesn't exist yet, don't block — just warn
+        if (backendErr?.name === "TimeoutError") {
+          backendOk = false;
+          backendMsg = "Backend URL timed out (>12s). Is your tunnel running?";
+        } else {
+          backendMsg = "(backend pre-check skipped — route not deployed yet)";
+        }
+      }
+
+      const latencyMs = Date.now() - t0;
+      const ok = backendOk;
+      const bodyPreview = ok
+        ? `AgentGate server OK (${publicAgentGateBase()}).\n${backendMsg}\n\nOn-chain URL: ${url.trim() || "(loading...)"}\nBackend: ${trimmedBackend}\n\nAfter publish, agents pay x402 and AgentGate forwards to your backend.`
+        : "";
+      setTestResult({
+        ok, status: ok ? 200 : 0, statusText: ok ? "OK" : "Backend unreachable",
+        latencyMs, contentType: null, bodyPreview,
+        errorMsg: ok ? undefined : `Server OK but backend failed: ${backendMsg}`,
       });
     } catch (e: any) {
       setTestResult({
@@ -152,6 +214,20 @@ export function PublishForm() {
     if (wallet.state.chainId !== NETWORKS[selectedNet].chainId) {
       await wallet.switchNetwork(selectedNet); return;
     }
+
+    // GUARD: validate the backend URL format one more time before spending
+    // any gas or USDC. This prevents the "published with garbage URL" bug
+    // where on-chain txs succeed but the proxy-config POST fails later
+    // because the backend is unreachable. The Test button already catches
+    // this, but a user could change the URL after passing the test.
+    const trimmedBackendUrl = backendUrl.trim();
+    if (trimmedBackendUrl) {
+      try { new URL(trimmedBackendUrl); } catch {
+        setPublishError(`Invalid backend URL: "${trimmedBackendUrl}". Must start with https:// or http://. Fix it before publishing — on-chain transactions cost real USDC.`);
+        return;
+      }
+    }
+
     setPublishing(true);
     setPublishError(null);
     setPublishResult(null);
