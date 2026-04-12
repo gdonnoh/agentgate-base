@@ -3,7 +3,7 @@
  * @agentgate/cli — One command to monetize your local AI.
  *
  * Usage:
- *   npx @agentgate/cli tunnel --token agt_xxxxx
+ *   npx agentgate-cli tunnel --token agt_xxxxx
  *
  * What it does:
  *   1. Checks Ollama is running locally

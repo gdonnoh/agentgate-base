@@ -270,15 +270,38 @@ export function PublishForm() {
         [DEPLOYMENTS[selectedNet].publisherRegistry, PUBLISHING_FEE]
       );
 
-      // Step 2: Register on PublisherRegistry (pays the fee)
+      // Step 2: Register on PublisherRegistry (pays the fee).
+      // The free Base Sepolia RPC can lag 1-3s behind the block where the
+      // approve landed. If simulateContract sees stale allowance=0, it
+      // throws "exceeds allowance". We retry once after a short delay to
+      // give the RPC time to index the approve receipt.
       setPublishStep("2/3 Registering endpoint...");
-      const regHash = await wallet.writeContract(
-        selectedNet,
-        DEPLOYMENTS[selectedNet].publisherRegistry,
-        REGISTRY_ABI as any,
-        "registerEndpoint",
-        [url.trim(), priceUnits, paymasterAddress]
-      );
+      let regHash: string;
+      try {
+        regHash = await wallet.writeContract(
+          selectedNet,
+          DEPLOYMENTS[selectedNet].publisherRegistry,
+          REGISTRY_ABI as any,
+          "registerEndpoint",
+          [url.trim(), priceUnits, paymasterAddress]
+        );
+      } catch (regErr: any) {
+        const msg = regErr?.shortMessage || regErr?.message || "";
+        if (msg.includes("allowance") || msg.includes("Allowance")) {
+          // RPC lag — wait and retry
+          setPublishStep("2/3 RPC syncing... retrying registration...");
+          await new Promise(r => setTimeout(r, 3000));
+          regHash = await wallet.writeContract(
+            selectedNet,
+            DEPLOYMENTS[selectedNet].publisherRegistry,
+            REGISTRY_ABI as any,
+            "registerEndpoint",
+            [url.trim(), priceUnits, paymasterAddress]
+          );
+        } else {
+          throw regErr;
+        }
+      }
 
       setPublishResult({ txHash: regHash, networkId: selectedNet, endpointId });
 
@@ -439,7 +462,7 @@ export function PublishForm() {
           <span className="text-text-muted"> — publish an endpoint below, then run:</span>
         </p>
         <code className="text-xs text-accent font-mono bg-bg border border-border rounded-sm px-3 py-2 block">
-          npx @agentgate/cli tunnel --token {"<"}your-token{">"}
+          npx agentgate-cli tunnel --token {"<"}your-token{">"}
         </code>
         <p className="text-xs text-text-muted font-sans">
           Starts a tunnel from your machine to AgentGate. Buyers pay USDC, you earn per call. No wallet or private key needed in the terminal.
@@ -1098,12 +1121,12 @@ export function PublishForm() {
                 </p>
                 <div className="relative">
                   <code className="text-[11px] text-accent font-mono break-all bg-surface p-2 rounded-sm block pr-16">
-                    npx @agentgate/cli tunnel --token {tunnelToken}
+                    npx agentgate-cli tunnel --token {tunnelToken}
                   </code>
                   <button
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(`npx @agentgate/cli tunnel --token ${tunnelToken}`);
+                        await navigator.clipboard.writeText(`npx agentgate-cli tunnel --token ${tunnelToken}`);
                       } catch {}
                     }}
                     className="absolute top-1.5 right-1.5 text-[10px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 border border-border rounded-sm"

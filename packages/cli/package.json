@@ -1,6 +1,7 @@
 {
-  "name": "@agentgate/cli",
+  "name": "agentgate-cli",
   "version": "0.1.0",
+  "description": "One command to share and monetize your local AI via AgentGate",
   "private": true,
   "type": "module",
   "bin": {
