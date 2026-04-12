@@ -65,6 +65,7 @@ export function PublishForm() {
   const [maxOutputTokens, setMaxOutputTokens] = useState(1000);
   const [proxyDone,       setProxyDone]       = useState<string | null>(null);
   const [proxyError,      setProxyError]      = useState<string | null>(null);
+  const [tunnelToken,     setTunnelToken]     = useState<string | null>(null);
 
   const [testing,       setTesting]       = useState(false);
   const [testResult,    setTestResult]    = useState<TestResult | null>(null);
@@ -365,6 +366,7 @@ export function PublishForm() {
           const data = await res.json() as any;
           if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
           setProxyDone(data.proxyUrl);
+          if (data.tunnelToken) setTunnelToken(data.tunnelToken);
         } catch (proxyErr: any) {
           setProxyError(proxyErr.message || String(proxyErr));
         }
@@ -1035,6 +1037,35 @@ export function PublishForm() {
                 <code className="text-[10px] text-text-muted font-mono break-all bg-surface p-1.5 rounded-sm">
                   curl {publicAgentGateBase()}{proxyDone}
                 </code>
+              </div>
+            )}
+
+            {/* CLI tunnel command — shown when we have a tunnel token */}
+            {tunnelToken && (
+              <div className="bg-bg border border-accent/30 rounded-sm p-3 flex flex-col gap-2">
+                <div className="text-sm font-bold text-accent font-sans">Connect your local AI</div>
+                <p className="text-xs text-text-muted font-sans">
+                  Run this in a terminal to start a tunnel from your machine to this endpoint.
+                  No wallet needed — the token authenticates you.
+                </p>
+                <div className="relative">
+                  <code className="text-[11px] text-accent font-mono break-all bg-surface p-2 rounded-sm block pr-16">
+                    npx @agentgate/cli tunnel --token {tunnelToken}
+                  </code>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(`npx @agentgate/cli tunnel --token ${tunnelToken}`);
+                      } catch {}
+                    }}
+                    className="absolute top-1.5 right-1.5 text-[10px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 border border-border rounded-sm"
+                  >
+                    copy
+                  </button>
+                </div>
+                <p className="text-[10px] text-text-muted/60 font-sans">
+                  Save this token — it is shown only once. If you lose it, re-publish from this form to generate a new one.
+                </p>
               </div>
             )}
 

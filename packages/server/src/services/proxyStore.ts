@@ -52,6 +52,10 @@ export interface ProxyConfig {
   contentType:     ContentType;
   /** Pricing model — flat per call or token-budget. */
   pricingModel:    PricingModel;
+  /** Random token for CLI tunnel auth. Generated once at publish time,
+   *  shown to the publisher, then used by the CLI to update backendUrl
+   *  without needing a wallet signature. Never exposed in public API. */
+  tunnelToken?:    string;
   /** USD per 1,000,000 tokens (input+output pooled). Only used when pricingModel === "per-token". */
   pricePerMillionTokens?: number;
   /** Max input tokens allowed per request (approximated as body length / 4). */
@@ -219,6 +223,10 @@ async function initPostgres() {
       `ALTER TABLE proxy_configs
          ADD COLUMN IF NOT EXISTS content_type TEXT NOT NULL DEFAULT '${DEFAULT_CONTENT_TYPE}'`
     );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS tunnel_token TEXT`
+    );
     // Per-token pricing fields. NULLABLE because per-call endpoints (the
     // default) don't use them at all.
     await pgPool.query(
@@ -284,6 +292,7 @@ async function initPostgres() {
         pricePerMillionTokens: row.price_per_million_tokens ?? undefined,
         maxInputTokens:  row.max_input_tokens ?? undefined,
         maxOutputTokens: row.max_output_tokens ?? undefined,
+        tunnelToken:     row.tunnel_token ?? undefined,
       };
       cache.set(config.endpointId, config);
     }
@@ -356,19 +365,21 @@ async function pgSet(config: ProxyConfig) {
        (endpoint_id, name, backend_url, inject_headers, publisher_addr,
         require_world_id, registered_at, max_concurrent, payment_timeout_seconds,
         content_type, pricing_model, price_per_million_tokens,
-        max_input_tokens, max_output_tokens)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        max_input_tokens, max_output_tokens, tunnel_token)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
        publisher_addr = $5, require_world_id = $6, registered_at = $7,
        max_concurrent = $8, payment_timeout_seconds = $9,
        content_type = $10, pricing_model = $11, price_per_million_tokens = $12,
-       max_input_tokens = $13, max_output_tokens = $14`,
+       max_input_tokens = $13, max_output_tokens = $14,
+       tunnel_token = COALESCE($15, proxy_configs.tunnel_token)`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
      config.publisherAddr, config.requireWorldId, config.registeredAt,
      config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType,
      config.pricingModel, config.pricePerMillionTokens ?? null,
-     config.maxInputTokens ?? null, config.maxOutputTokens ?? null]
+     config.maxInputTokens ?? null, config.maxOutputTokens ?? null,
+     config.tunnelToken ?? null]
   );
 }
 
@@ -454,6 +465,16 @@ export const proxyStore = {
 
   all(): ProxyConfig[] {
     return Array.from(cache.values());
+  },
+
+  /** Find a config by its tunnel token. Returns undefined if not found or
+   *  if the endpoint has no token assigned. O(N) scan — fine at small scale. */
+  getByTunnelToken(token: string): ProxyConfig | undefined {
+    if (!token) return undefined;
+    for (const config of cache.values()) {
+      if (config.tunnelToken && config.tunnelToken === token) return config;
+    }
+    return undefined;
   },
 };
 

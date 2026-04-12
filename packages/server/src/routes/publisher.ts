@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { createPublicClient, http, recoverMessageAddress } from "viem";
 import { defineChain } from "viem";
+import { randomBytes } from "crypto";
 import {
   proxyStore,
   callTracker,
@@ -114,6 +115,54 @@ router.get("/endpoints/:address", (c) => {
       "https://agentgate.demo/api/weather",
       "https://agentgate.demo/api/prices",
     ],
+  });
+});
+
+/**
+ * POST /api/publisher/proxy-config/set-tunnel
+ *
+ * Called by the @agentgate/cli `tunnel` command. The CLI starts a cloudflared
+ * tunnel, gets a public URL, and POSTs it here so the proxy knows where to
+ * forward paid calls. Auth is via the tunnel token generated at publish time
+ * — no wallet signature required, making the CLI headless-friendly.
+ *
+ * Body: { token: string, tunnelUrl: string }
+ */
+router.post("/proxy-config/set-tunnel", async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { token, tunnelUrl } = body;
+  if (!token || typeof token !== "string") {
+    return c.json({ error: "Missing token" }, 400);
+  }
+  if (!tunnelUrl || typeof tunnelUrl !== "string") {
+    return c.json({ error: "Missing tunnelUrl" }, 400);
+  }
+
+  // Validate URL format
+  try { new URL(tunnelUrl); } catch {
+    return c.json({ error: `Invalid tunnelUrl: "${tunnelUrl}"` }, 400);
+  }
+
+  // Look up the endpoint by tunnel token
+  const config = proxyStore.getByTunnelToken(token);
+  if (!config) {
+    return c.json({ error: "Invalid or expired tunnel token" }, 403);
+  }
+
+  // Update the backendUrl. Keep everything else intact.
+  const updated = { ...config, backendUrl: tunnelUrl };
+  proxyStore.set(updated);
+
+  console.log(`[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl} (via CLI token)`);
+  return c.json({
+    ok: true,
+    endpointId: config.endpointId,
+    proxyUrl: `/api/proxy/${config.endpointId}`,
+    backendUrl: tunnelUrl,
   });
 });
 
@@ -316,6 +365,13 @@ router.post("/proxy-config", async (c) => {
       : DEFAULT_MAX_OUTPUT_TOKENS;
   }
 
+  // Generate a tunnel token if this endpoint doesn't have one yet. The
+  // token lets the CLI update the backendUrl (cloudflared tunnel URLs
+  // change on restart) without needing a wallet signature. It's shown
+  // once in the publish response and never again in public API routes.
+  const existing = proxyStore.get(Number(endpointId));
+  const tunnelToken = existing?.tunnelToken || `agt_${randomBytes(24).toString("base64url")}`;
+
   // 6. Store proxy config
   proxyStore.set({
     endpointId:     Number(endpointId),
@@ -332,6 +388,7 @@ router.post("/proxy-config", async (c) => {
     pricePerMillionTokens,
     maxInputTokens,
     maxOutputTokens,
+    tunnelToken,
   });
 
   // Re-publishing an endpoint the publisher had previously hidden or
@@ -344,6 +401,7 @@ router.post("/proxy-config", async (c) => {
     success:  true,
     proxyUrl: `/api/proxy/${endpointId}`,
     verified: true,
+    tunnelToken,
     message:  `Proxy configured and verified. Agents can now call /api/proxy/${endpointId} and pay USDC to reach ${backendUrl}`,
   });
 });
