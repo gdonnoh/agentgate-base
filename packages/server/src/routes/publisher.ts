@@ -255,9 +255,12 @@ router.post("/proxy-config", async (c) => {
 
   const { endpointId, backendUrl, injectHeaders, walletAddress, signature, timestamp } = body;
 
-  if (endpointId === undefined || !backendUrl || !walletAddress || !signature || !timestamp) {
-    return c.json({ error: "Missing required fields: endpointId, backendUrl, walletAddress, signature, timestamp" }, 400);
+  if (endpointId === undefined || !walletAddress || !signature || !timestamp) {
+    return c.json({ error: "Missing required fields: endpointId, walletAddress, signature, timestamp" }, 400);
   }
+  // backendUrl is optional — if empty, the publisher plans to connect via
+  // CLI later (set-tunnel route). We still save the config + generate a
+  // tunnel token so the CLI has something to authenticate with.
 
   // 1. Check timestamp freshness (within 10 minutes)
   if (Math.abs(Date.now() - Number(timestamp)) > 10 * 60 * 1000) {
@@ -293,8 +296,10 @@ router.post("/proxy-config", async (c) => {
     return c.json({ error: `Could not verify endpoint ownership on-chain: ${err.message}` }, 500);
   }
 
-  // 4. Verify backend is reachable before accepting the config
-  let backendVerified = false;
+  // 4. Verify backend is reachable before accepting the config.
+  //    Skip entirely if backendUrl is empty (CLI-first flow — the publisher
+  //    will provide the URL later via the tunnel token + set-tunnel route).
+  let backendVerified = !backendUrl; // empty URL = skip verification
   let backendStatus = 0;
   try {
     const testHeaders: Record<string, string> = {};

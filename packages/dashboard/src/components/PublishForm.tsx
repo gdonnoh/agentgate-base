@@ -211,7 +211,8 @@ export function PublishForm() {
 
   // ── Publish on-chain ──────────────────────────────────────────────────────
   async function handlePublish() {
-    if (!testResult?.ok) return;
+    // If the URL is empty, skip test requirement — the CLI will set it later.
+    if (!testResult?.ok && backendUrl.trim()) return;
     if (!wallet.state.connected) { await wallet.connect(); return; }
     if (wallet.state.chainId !== NETWORKS[selectedNet].chainId) {
       await wallet.switchNetwork(selectedNet); return;
@@ -412,7 +413,11 @@ export function PublishForm() {
   }
 
   const wrongNetwork = wallet.state.connected && wallet.state.chainId !== NETWORKS[selectedNet].chainId;
-  const canPublish   = testResult?.ok && !publishing && !publishResult;
+  // If backendUrl is empty the publisher plans to connect via CLI later.
+  // In that case Test Connection is not required — they can publish right
+  // away and get a tunnel token. The CLI will set the URL via set-tunnel.
+  const urlEmpty     = !backendUrl.trim();
+  const canPublish   = (testResult?.ok || urlEmpty) && !publishing && !publishResult;
   const gasDepositNum = parseDecimalInput(gasDeposit);
   // 0% sponsorship => no point depositing ETH (the paymaster covers nothing).
   const hasDeposit    = Number.isFinite(gasDepositNum) && gasDepositNum > 0 && gasSharePct > 0;
@@ -501,6 +506,11 @@ export function PublishForm() {
           onChange={(e) => setBackendUrl(e.target.value)}
           className="input"
         />
+        {contentType === "api" && !backendUrl.trim() && (
+          <p className="text-[11px] text-text-muted font-sans">
+            Leave empty if you'll connect via CLI later. You'll get a tunnel token after publishing.
+          </p>
+        )}
       </div>
 
       {/* ── Simple price input (always visible) ── */}
@@ -968,12 +978,14 @@ export function PublishForm() {
         >
           {publishing
             ? (publishStep || "Publishing...")
-            : !testResult?.ok
+            : !testResult?.ok && backendUrl.trim()
             ? "Test endpoint first"
             : !wallet.state.connected
             ? "Connect wallet + publish"
             : wrongNetwork
             ? `Switch to ${NETWORKS[selectedNet].label}`
+            : urlEmpty
+            ? hasDeposit ? `Publish + fund ${gasDeposit} ETH (CLI connects later)` : "Publish on-chain (CLI connects later)"
             : backendUrl.trim()
             ? hasDeposit ? `Publish + fund ${gasDeposit} ETH + activate proxy` : "Publish + activate proxy"
             : hasDeposit ? `Publish + fund ${gasDeposit} ETH gas budget` : "Publish on-chain"

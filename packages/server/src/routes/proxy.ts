@@ -252,7 +252,17 @@ router.all("/:endpointId/*", async (c) => {
     return c.json({ error: `No proxy config for endpoint #${endpointId}. Register via POST /api/publisher/proxy-config` }, 404);
   }
 
-  // 1b. Concurrency gate — reject over-capacity BEFORE any payment processing
+  // 1b. If the publisher hasn't connected a backend yet (CLI-first flow where
+  //     they publish on-chain first, then run the CLI to set the tunnel URL),
+  //     reject early with a helpful message instead of a cryptic 502.
+  if (!proxyConfig.backendUrl) {
+    return c.json({
+      error: `Endpoint #${endpointId} is registered but not yet connected to a backend. The publisher needs to run: npx @agentgate/cli tunnel --token <token>`,
+      status: "pending_connection",
+    }, 503);
+  }
+
+  // 1c. Concurrency gate — reject over-capacity BEFORE any payment processing
   //     so callers are never charged when the publisher's backend is saturated.
   //     A small retry window (3s) is communicated via Retry-After so polite
   //     clients back off without hammering.
