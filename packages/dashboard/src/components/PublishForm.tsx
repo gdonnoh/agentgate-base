@@ -44,8 +44,10 @@ export function PublishForm() {
 
   const [url,           setUrl]           = useState("");
   const [price,         setPrice]         = useState("0.10");
-  const [gasSharePct,   setGasSharePct]   = useState(100);
-  const [gasDeposit,    setGasDeposit]    = useState("0.005");
+  // Gas defaults to OFF so publishers are never charged without explicitly
+  // opting in via the Advanced settings panel.
+  const [gasSharePct,   setGasSharePct]   = useState(0);
+  const [gasDeposit,    setGasDeposit]    = useState("0");
   const [selectedNet] = useState<NetworkId>("baseSepolia");
 
   // Hardcoded gas price: 0.1 Gwei for Base Sepolia (L2 is cheap)
@@ -324,10 +326,13 @@ export function PublishForm() {
         }
       }
 
-      // Step 3 (optional): Activate proxy config
-      if (backendUrl.trim()) {
+      // Step 3: Activate proxy config + get tunnel token.
+      // This runs even when backendUrl is empty (CLI-first flow) because the
+      // server generates the tunnel token in this POST. Without it the
+      // publisher never sees the `npx agentgate tunnel --token xxx` command.
+      {
         step++;
-        setPublishStep(`${step}/${totalSteps} Activating proxy...`);
+        setPublishStep(`${step}/${totalSteps} ${backendUrl.trim() ? "Activating proxy..." : "Generating tunnel token..."}`);
         try {
           const injectHeaders: Record<string, string> = {};
           if (contentType === "api") {
@@ -335,29 +340,25 @@ export function PublishForm() {
               if (row.key.trim()) injectHeaders[row.key.trim()] = row.val.trim();
             }
           }
+          const effectiveBackendUrl = backendUrl.trim() || "";
           const timestamp = Date.now();
-          const message   = `AgentGate proxy config\nendpointId: ${endpointId}\nbackendUrl: ${backendUrl.trim()}\ntimestamp: ${timestamp}`;
+          const message   = `AgentGate proxy config\nendpointId: ${endpointId}\nbackendUrl: ${effectiveBackendUrl || "(cli)"}\ntimestamp: ${timestamp}`;
           const signature = await (window as any).ethereum.request({
             method: "personal_sign",
             params: [message, wallet.state.address],
           });
-          // In webpage mode the endpoint name must NOT leak the backend
-          // hostname — the whole pay-to-unlock model depends on the URL
-          // being secret. Let the backend default to "Endpoint #N" instead.
           const publicName = contentType === "webpage" ? undefined : (endpointName || undefined);
           const res = await fetch(`${SERVER}/api/publisher/proxy-config`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               endpointId, name: publicName,
-              backendUrl: backendUrl.trim(),
+              backendUrl: effectiveBackendUrl,
               injectHeaders, requireWorldId,
               maxConcurrent,
               paymentTimeoutSeconds,
               contentType,
               pricingModel,
-              // Only sent when pricingModel === "per-token" — the server
-              // ignores these fields for "per-call" endpoints.
               pricePerMillionTokens: pricingModel === "per-token" ? pricePerMillionTokens : undefined,
               maxInputTokens:        pricingModel === "per-token" ? maxInputTokens        : undefined,
               maxOutputTokens:       pricingModel === "per-token" ? maxOutputTokens       : undefined,

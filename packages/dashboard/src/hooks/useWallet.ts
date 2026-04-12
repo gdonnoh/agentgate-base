@@ -108,11 +108,15 @@ export function useWallet() {
         ...(value !== undefined ? { value } : {}),
       });
       const hash = await walletClient.writeContract({ ...request });
-      // Wait for the tx to be mined before returning, so the next simulateContract
-      // sees the resulting state (e.g. allowance after approve). Without this, a
-      // follow-up call like registerEndpoint reverts with "transfer amount exceeds
-      // allowance" because the approval hasn't landed on-chain yet.
-      await publicClient.waitForTransactionReceipt({ hash });
+      // Wait for the tx to be mined AND check it succeeded. Without the
+      // wait, a follow-up call like registerEndpoint sees stale state and
+      // reverts. Without the status check, a silently reverted approve lets
+      // the flow continue into registerEndpoint which then fails with
+      // "transfer amount exceeds allowance".
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status === "reverted") {
+        throw new Error(`Transaction reverted on-chain (tx: ${hash})`);
+      }
       return hash;
     },
     [state.address]

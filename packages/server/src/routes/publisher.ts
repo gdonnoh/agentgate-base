@@ -267,8 +267,11 @@ router.post("/proxy-config", async (c) => {
     return c.json({ error: "Signature timestamp expired (must be within 10 minutes)" }, 400);
   }
 
-  // 2. Recover signer from EIP-191 signature
-  const message = `AgentGate proxy config\nendpointId: ${endpointId}\nbackendUrl: ${backendUrl}\ntimestamp: ${timestamp}`;
+  // 2. Recover signer from EIP-191 signature.
+  //    When backendUrl is empty (CLI-first flow), the client signs "(cli)"
+  //    as the URL placeholder so the message is never ambiguous.
+  const signedBackendUrl = backendUrl || "(cli)";
+  const message = `AgentGate proxy config\nendpointId: ${endpointId}\nbackendUrl: ${signedBackendUrl}\ntimestamp: ${timestamp}`;
   let recovered: string;
   try {
     recovered = await recoverMessageAddress({ message, signature });
