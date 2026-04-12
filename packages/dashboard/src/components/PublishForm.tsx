@@ -425,6 +425,20 @@ export function PublishForm() {
   return (
     <div className="flex flex-col gap-6">
 
+      {/* ── CLI quick-start banner ── */}
+      <div className="rounded-lg border border-accent/30 bg-accent-dim p-4 flex flex-col gap-2">
+        <p className="text-sm text-text font-sans">
+          <strong className="font-semibold">Share your local AI in one command</strong>
+          <span className="text-text-muted"> — publish an endpoint below, then run:</span>
+        </p>
+        <code className="text-xs text-accent font-mono bg-bg border border-border rounded-sm px-3 py-2 block">
+          npx @agentgate/cli tunnel --token {"<"}your-token{">"}
+        </code>
+        <p className="text-xs text-text-muted font-sans">
+          Starts a tunnel from your machine to AgentGate. Buyers pay USDC, you earn per call. No wallet or private key needed in the terminal.
+        </p>
+      </div>
+
       {/* ── Hero text ── */}
       <div>
         <h2 className="text-lg font-semibold text-text mb-1 font-sans">Monetize any API or URL</h2>
