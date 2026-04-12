@@ -66,6 +66,7 @@ export function PublishForm() {
   const [proxyDone,       setProxyDone]       = useState<string | null>(null);
   const [proxyError,      setProxyError]      = useState<string | null>(null);
   const [tunnelToken,     setTunnelToken]     = useState<string | null>(null);
+  const [showAdvanced,    setShowAdvanced]    = useState(false);
 
   const [testing,       setTesting]       = useState(false);
   const [testResult,    setTestResult]    = useState<TestResult | null>(null);
@@ -502,6 +503,37 @@ export function PublishForm() {
         />
       </div>
 
+      {/* ── Simple price input (always visible) ── */}
+      <div className="flex flex-col gap-1.5">
+        <label className="label">Price per call</label>
+        <div className="flex items-center gap-2">
+          <span className="text-text-muted text-lg">$</span>
+          <input
+            type="number"
+            min="0"
+            step="0.001"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            className="input w-28 text-center font-mono"
+          />
+          <span className="text-sm text-text-muted font-sans">USDC per call</span>
+        </div>
+      </div>
+
+      {/* ── Advanced settings toggle ── */}
+      <button
+        type="button"
+        onClick={() => setShowAdvanced(!showAdvanced)}
+        className="flex items-center gap-2 text-xs font-mono text-text-muted hover:text-accent transition-colors self-start"
+      >
+        <span className={`transition-transform ${showAdvanced ? "rotate-90" : ""}`}>▸</span>
+        {showAdvanced ? "Hide advanced settings" : "Advanced settings"}
+        <span className="text-text-muted/40">(headers, pricing model, gas, verification)</span>
+      </button>
+
+      {/* ── ADVANCED SETTINGS (collapsed by default) ─────────────────── */}
+      {showAdvanced && (<>
+
       {/* ── Auth Headers (only for API mode) ── */}
       {contentType === "api" && (
         <div className="flex flex-col gap-2">
@@ -623,21 +655,7 @@ export function PublishForm() {
           </>
         )}
 
-        {/* Flat price input (always shown for webpage, conditional for api) */}
-        {(contentType === "webpage" || pricingModel === "per-call") && (
-          <div className="flex items-center gap-2">
-            <span className="text-text-muted text-lg">$</span>
-            <input
-              type="number"
-              min="0"
-              step="0.001"
-              value={price}
-              onChange={(e) => setPrice(e.target.value)}
-              className="input w-28 text-center font-mono"
-            />
-            <span className="text-sm text-text-muted font-sans">per call (paid in USDC)</span>
-          </div>
-        )}
+        {/* Flat price input moved to the simple form above — not duplicated here */}
 
         {/* Per-token budget configuration */}
         {contentType === "api" && pricingModel === "per-token" && (
@@ -879,6 +897,9 @@ export function PublishForm() {
           </p>
         )}
       </div>
+
+      </>)}
+      {/* ── END ADVANCED SETTINGS ─────────────────────────────────────── */}
 
       {/* ── Test Connection ── */}
       <button
