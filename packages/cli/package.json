@@ -1,6 +1,6 @@
 {
   "name": "agentgate-cli",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "One command to share and monetize your local AI via AgentGate",
   "type": "module",
   "license": "MIT",
@@ -10,9 +10,7 @@
     "url": "https://github.com/gdonnoh/agentgate-base"
   },
   "keywords": ["agentgate", "ollama", "ai", "monetize", "x402", "usdc", "tunnel", "cli"],
-  "bin": {
-    "agentgate": "./dist/index.js"
-  },
+  "bin": "./dist/index.js",
   "files": ["dist"],
   "scripts": {
     "dev": "tsx src/index.ts",

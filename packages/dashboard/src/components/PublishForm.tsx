@@ -275,22 +275,16 @@ export function PublishForm() {
       // approve landed. If simulateContract sees stale allowance=0, it
       // throws "exceeds allowance". We retry once after a short delay to
       // give the RPC time to index the approve receipt.
+      // Wait a bit so the free Base Sepolia RPC indexes the approve receipt
+      // before simulateContract runs for registerEndpoint.
+      setPublishStep("2/3 Waiting for approval confirmation...");
+      await new Promise(r => setTimeout(r, 4000));
+
       setPublishStep("2/3 Registering endpoint...");
-      let regHash: string;
-      try {
-        regHash = await wallet.writeContract(
-          selectedNet,
-          DEPLOYMENTS[selectedNet].publisherRegistry,
-          REGISTRY_ABI as any,
-          "registerEndpoint",
-          [url.trim(), priceUnits, paymasterAddress]
-        );
-      } catch (regErr: any) {
-        const msg = regErr?.shortMessage || regErr?.message || "";
-        if (msg.includes("allowance") || msg.includes("Allowance")) {
-          // RPC lag — wait and retry
-          setPublishStep("2/3 RPC syncing... retrying registration...");
-          await new Promise(r => setTimeout(r, 3000));
+      let regHash: string | undefined;
+      let lastErr: any = null;
+      for (let attempt = 1; attempt <= 3 && !regHash; attempt++) {
+        try {
           regHash = await wallet.writeContract(
             selectedNet,
             DEPLOYMENTS[selectedNet].publisherRegistry,
@@ -298,10 +292,18 @@ export function PublishForm() {
             "registerEndpoint",
             [url.trim(), priceUnits, paymasterAddress]
           );
-        } else {
-          throw regErr;
+        } catch (regErr: any) {
+          lastErr = regErr;
+          const msg = regErr?.shortMessage || regErr?.message || "";
+          if (msg.toLowerCase().includes("allowance")) {
+            setPublishStep(`2/3 RPC syncing... retry ${attempt}/3`);
+            await new Promise(r => setTimeout(r, 5000));
+          } else {
+            throw regErr;
+          }
         }
       }
+      if (!regHash) throw lastErr;
 
       setPublishResult({ txHash: regHash, networkId: selectedNet, endpointId });
 
