@@ -19,6 +19,50 @@ interface Bucket {
   hits: number[];
 }
 
+/**
+ * Pick the client IP we'll use as a rate-limit key.
+ *
+ * Header precedence (SECURITY-CRITICAL):
+ *   1. `cf-connecting-ip` — set by Cloudflare to the original client IP.
+ *      Clients cannot spoof this because Cloudflare overwrites whatever the
+ *      caller sent. This is the correct header when traffic goes
+ *      client → Cloudflare → Render → us.
+ *   2. `x-real-ip` — set by Render (and most reverse proxies) to the socket
+ *      peer IP seen by the platform. Also not client-settable in practice.
+ *   3. Raw socket peer IP via Hono's `c.env.incoming`. Safe against header
+ *      spoofing because it's the TCP source address.
+ *   4. `x-forwarded-for` is trusted ONLY when env `TRUST_PROXY=true` is set.
+ *      In all other cases we IGNORE it, because attackers can freely set it
+ *      on the wire and we'd otherwise grant each attacker a fresh per-IP
+ *      budget by rotating the value.
+ *
+ * Previously we read x-forwarded-for unconditionally — that meant an attacker
+ * sending `X-Forwarded-For: 1.2.3.4` bypassed per-IP rate limits entirely.
+ */
+function resolveClientIp(c: any): string {
+  const cf = c.req.header("cf-connecting-ip") || c.req.header("CF-Connecting-IP");
+  if (cf) return cf.split(",")[0].trim();
+
+  const real = c.req.header("x-real-ip") || c.req.header("X-Real-IP");
+  if (real) return real.split(",")[0].trim();
+
+  if (process.env.TRUST_PROXY === "true") {
+    const xff = c.req.header("x-forwarded-for") || c.req.header("X-Forwarded-For");
+    if (xff) return xff.split(",")[0].trim();
+  }
+
+  // Raw socket peer IP — Hono's Node adapter exposes the original IncomingMessage
+  // on c.env.incoming. Reach in defensively because other adapters (bun, deno)
+  // don't have this shape.
+  try {
+    const incoming = (c?.env as any)?.incoming;
+    const remote = incoming?.socket?.remoteAddress ?? incoming?.connection?.remoteAddress;
+    if (typeof remote === "string" && remote) return remote;
+  } catch { /* ignore */ }
+
+  return "unknown";
+}
+
 export interface RateLimitOptions {
   /** Requests allowed per window per IP. Default: 60. */
   limit?: number;
@@ -87,11 +131,9 @@ export function agentRateLimit(opts: AgentRateLimitOptions = {}): MiddlewareHand
       }
     }
     if (!agent) {
-      const xff = c.req.header("x-forwarded-for");
-      agent = (xff && xff.split(",")[0].trim()) ||
-        c.req.header("x-real-ip") ||
-        c.req.header("cf-connecting-ip") ||
-        "unknown";
+      // Trusted IP resolution — see resolveClientIp() doc for why we no
+      // longer read x-forwarded-for unconditionally.
+      agent = resolveClientIp(c);
     }
 
     const key = `${epId}:${agent}`;
@@ -140,13 +182,11 @@ export function rateLimit(opts: RateLimitOptions = {}): MiddlewareHandler {
   if (typeof cleanup.unref === "function") cleanup.unref();
 
   return async (c, next) => {
-    // Best-effort IP extraction. Hono's Node adapter gives us the raw headers.
-    const xff = c.req.header("x-forwarded-for");
-    const ip =
-      (xff && xff.split(",")[0].trim()) ||
-      c.req.header("x-real-ip") ||
-      c.req.header("cf-connecting-ip") ||
-      "unknown";
+    // Trusted IP resolution — prefers cf-connecting-ip / x-real-ip / raw
+    // socket IP. Ignores x-forwarded-for unless TRUST_PROXY=true. This
+    // stops attackers from bypassing the per-IP budget by setting an
+    // arbitrary X-Forwarded-For on each request.
+    const ip = resolveClientIp(c);
 
     const now = Date.now();
     const b = buckets.get(ip) || { hits: [] };

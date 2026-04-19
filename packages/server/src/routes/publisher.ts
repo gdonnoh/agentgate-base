@@ -57,6 +57,86 @@ const REGISTRY_ABI = [
 
 const router = new Hono();
 
+/**
+ * Fetch the on-chain URL for `endpointId` and assert the given backend URL
+ * matches on both hostname AND pathname. This prevents two separate attacks:
+ *
+ *   1) Hostname divergence — buyer sees example.com on-chain, proxy forwards
+ *      to attacker.com. Breaks the "what you see is what you get" contract.
+ *   2) Path divergence — buyer sees /api/weather on-chain, proxy forwards to
+ *      /admin on the same host. Still lets a compromised server redirect
+ *      traffic into an unrelated path on the publisher's own origin.
+ *
+ * Escape hatch: when the on-chain URL is empty (CLI-first flow — the endpoint
+ * was registered without a URL because the publisher planned to connect later
+ * via the tunnel token) we allow the operation to proceed. Otherwise we'd
+ * deadlock the headless-publisher workflow.
+ *
+ * Throws { message, status } on mismatch so callers can forward it to the HTTP
+ * response directly.
+ */
+async function assertUrlMatchesOnChain(
+  endpointId: number,
+  backendUrl: string,
+): Promise<void> {
+  const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
+  const ep = await client.readContract({
+    address: REGISTRY, abi: REGISTRY_ABI,
+    functionName: "endpoints", args: [BigInt(endpointId)],
+  }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
+
+  const onChainUrl = ep[2];
+  // Empty on-chain URL = CLI-first flow where the publisher deferred the URL
+  // until tunnel-connect time. Allow through.
+  if (!onChainUrl) return;
+
+  let backendHost: string, backendPath: string;
+  let onChainHost: string, onChainPath: string;
+  try {
+    const b = new URL(backendUrl);
+    backendHost = b.hostname.toLowerCase();
+    backendPath = b.pathname || "/";
+  } catch {
+    const err: any = new Error(`Invalid backendUrl: "${backendUrl}"`);
+    err.status = 400;
+    throw err;
+  }
+  try {
+    const o = new URL(onChainUrl);
+    onChainHost = o.hostname.toLowerCase();
+    onChainPath = o.pathname || "/";
+  } catch {
+    // On-chain URL is malformed — can't enforce a match. Log and let through
+    // so a bad legacy row doesn't brick publishing; the SSRF guard still
+    // protects us from obviously bad hosts.
+    console.warn(`[proxy-config] On-chain URL for endpoint #${endpointId} is malformed: "${onChainUrl}" — skipping match check`);
+    return;
+  }
+
+  if (backendHost !== onChainHost) {
+    const err: any = new Error(
+      `backendUrl hostname "${backendHost}" does not match the on-chain endpoint URL hostname "${onChainHost}". Update the on-chain registry entry first or use a matching host.`,
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  // Path comparison — normalise trailing slashes so "/api/weather" and
+  // "/api/weather/" compare equal. Allow the tunnel path to be a subpath of
+  // the on-chain path (e.g. on-chain /api, tunnel /api/v2) but NOT the
+  // reverse — that's the "registered /api/weather, tunnel /admin" case.
+  const normB = backendPath.replace(/\/+$/, "") || "/";
+  const normO = onChainPath.replace(/\/+$/, "") || "/";
+  const isSubpath = normO === "/" || normB === normO || normB.startsWith(normO + "/");
+  if (!isSubpath) {
+    const err: any = new Error(
+      `backendUrl pathname "${backendPath}" does not match the on-chain endpoint URL pathname "${onChainPath}". The tunnel path must equal or extend the registered path — buyers saw "${onChainPath}", you cannot silently redirect them elsewhere on the same host.`,
+    );
+    err.status = 400;
+    throw err;
+  }
+}
+
 // In-memory store for demo purposes
 const publisherStats: Record<
   string,
@@ -170,6 +250,19 @@ router.post("/proxy-config/set-tunnel", async (c) => {
   const config = proxyStore.getByTunnelToken(token);
   if (!config) {
     return c.json({ error: "Invalid or expired tunnel token" }, 403);
+  }
+
+  // Hostname + pathname match check against the on-chain endpoint URL.
+  // Same guarantee as POST /proxy-config — the tunnel can't silently point
+  // buyers at a host or path that wasn't registered on-chain. Empty on-chain
+  // URL is the documented escape hatch for the CLI-first flow (the publisher
+  // registered without a URL and is setting it now).
+  try {
+    await assertUrlMatchesOnChain(config.endpointId, tunnelUrl);
+  } catch (err: any) {
+    const status = (err && typeof err.status === "number") ? err.status : 500;
+    const message = (err && err.message) || `Could not verify tunnel URL against on-chain registry`;
+    return c.json({ error: message }, status === 400 ? 400 : 500);
   }
 
   // ── Nonce replay protection (R2-E) ──
@@ -354,28 +447,21 @@ router.post("/proxy-config", async (c) => {
     if (onChainPublisher !== walletAddress.toLowerCase()) {
       return c.json({ error: `Unauthorized: endpoint #${endpointId} is owned by ${ep[1]}, not ${walletAddress}` }, 403);
     }
-
-    // Hostname match check. Only enforced when both sides are present —
-    // during the CLI-first flow (backendUrl=="") we haven't yet picked a
-    // host, and some older on-chain entries don't have a URL either.
-    const onChainUrl = ep[2];
-    if (backendUrl && onChainUrl) {
-      try {
-        const backendHost = new URL(backendUrl).hostname.toLowerCase();
-        const onChainHost = new URL(onChainUrl).hostname.toLowerCase();
-        if (backendHost !== onChainHost) {
-          return c.json({
-            error: `backendUrl hostname "${backendHost}" does not match the on-chain endpoint URL hostname "${onChainHost}". Update the on-chain registry entry first or use a matching host.`,
-          }, 400);
-        }
-      } catch {
-        // If either URL fails to parse, we already validated backendUrl above
-        // so it must be onChainUrl that's malformed — fall through without
-        // blocking the publisher on a bad legacy row.
-      }
-    }
   } catch (err: any) {
     return c.json({ error: `Could not verify endpoint ownership on-chain: ${err.message}` }, 500);
+  }
+
+  // Hostname + pathname match check. Only enforced when backendUrl is set —
+  // during the CLI-first flow (backendUrl=="") we haven't picked a host yet
+  // and the helper's own empty-on-chain escape hatch handles legacy rows.
+  if (backendUrl) {
+    try {
+      await assertUrlMatchesOnChain(Number(endpointId), backendUrl);
+    } catch (err: any) {
+      const status = (err && typeof err.status === "number") ? err.status : 500;
+      const message = (err && err.message) || `Could not verify backendUrl against on-chain registry`;
+      return c.json({ error: message }, status === 400 ? 400 : 500);
+    }
   }
 
   // 4. Verify backend is reachable before accepting the config.

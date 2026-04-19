@@ -339,18 +339,35 @@ function usdToUsdcUnits(usdAmount: number): string {
  * termination at the edge, which would leak into the x402 402 challenge body
  * and trick clients into replaying payments against a plaintext URL. Prefer
  * the forwarded proto; otherwise pick https in production, http only in dev.
+ *
+ * SECURITY: the host is NEVER read from the `Host` request header. That
+ * header is attacker-controllable and would otherwise end up signed into
+ * x402 challenges ("resource" field) — giving an attacker a replayable
+ * payment authorization for their own domain. We pin the host in this order:
+ *
+ *   1. env `PUBLIC_HOST` (authoritative — set this in prod to the canonical
+ *      domain, e.g. `api.agentgate.xyz`).
+ *   2. Parsed host from `c.req.url` (Hono-normalized URL the adapter gave us).
+ *   3. "localhost:<port>" as a dev-only last resort.
  */
 function resolveResourceUrl(c: any): string {
+  const isDev = process.env.NODE_ENV !== "production";
+  let pathname = "/";
+  let search = "";
+  let urlHost = "";
   try {
     const orig = new URL(c.req.url);
-    const fwdProto = (c.req.header("x-forwarded-proto") || "").split(",")[0].trim().toLowerCase();
-    const host = c.req.header("host") || orig.host;
-    const isDev = process.env.NODE_ENV !== "production";
-    const proto = fwdProto || (isDev && host.includes("localhost") ? "http" : "https");
-    return `${proto}://${host}${orig.pathname}${orig.search}`;
-  } catch {
-    return c.req.url;
-  }
+    pathname = orig.pathname;
+    search = orig.search;
+    urlHost = orig.host;
+  } catch { /* fall through to env / default */ }
+
+  const pinnedHost = (process.env.PUBLIC_HOST || "").trim();
+  const host = pinnedHost || urlHost || `localhost:${process.env.PORT || 4021}`;
+
+  const fwdProto = (c.req.header("x-forwarded-proto") || "").split(",")[0].trim().toLowerCase();
+  const proto = fwdProto || (isDev && host.includes("localhost") ? "http" : "https");
+  return `${proto}://${host}${pathname}${search}`;
 }
 
 /**
@@ -751,11 +768,12 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
     const accept = c.req.header("accept") || "";
     const isBrowser = c.req.method === "GET" && accept.includes("text/html");
     if (isBrowser) {
-      // Build absolute URL forcing https behind proxies (Render/Cloudflare)
-      const forwardedProto = c.req.header("x-forwarded-proto");
-      const host = c.req.header("host") || "localhost:4021";
-      const proto = forwardedProto || (host.includes("localhost") ? "http" : "https");
-      const absUrl = `${proto}://${host}${c.req.path}`;
+      // Build absolute URL forcing https behind proxies (Render/Cloudflare).
+      // SECURITY: do NOT trust the Host header — use resolveResourceUrl()
+      // which pins the host to env PUBLIC_HOST or the adapter-parsed URL.
+      // Otherwise the paywall page bakes an attacker-supplied host into
+      // its self-links, which also flows into the x402 resource URL.
+      const absUrl = resolveResourceUrl(c);
 
       // For webpage endpoints we also override the displayed name: the
       // stored `name` field may be the backend hostname (auto-derived at
