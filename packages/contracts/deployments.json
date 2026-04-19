@@ -3,10 +3,10 @@
     "network": "baseSepolia",
     "chainId": 84532,
     "deployer": "0x05a7Ae061c14847e0B70f7851d76FC10289d69b0",
-    "publisherRegistry": "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2",
+    "publisherRegistry": "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456",
     "paymaster": "0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
     "entryPoint": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
-    "deployTxHash": "0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
+    "deployTxHash": "0x96562a76f73febc97aaf7b7a1dd8560d207acdedea8626a6adb0a79b1c021002",
     "paymasterDeployTxHash": "0xceadc603b97d77fff05e1d0fcceb46df209ff89ca92464b786d40f5013e767bf",
     "registerEndpointTxHash": "0x9fa5eb68c10d3448ac73b47313550f8ab9bbc468e1fdb29933537cf4041cd072",
     "fundTxHash": "0xd0e45ca518ff9f74d7eb927a1684edfb85732b9dfaeb983e0c7bab03a9b83b4f",
@@ -14,14 +14,22 @@
     "weatherEndpoint": "https://agentgate.demo/api/weather",
     "deployedAt": "2026-04-03T23:25:23.022Z",
     "explorer": {
-      "publisherRegistry": "https://sepolia.basescan.org/address/0xe5FC410c1E438D129949B9823C62CC153DD8C2F2",
-      "paymaster": "https://sepolia.basescan.org/address/0xddf2721Fd097Ed8e7998858C492a62d9D378626f",
-      "deployTx": "https://sepolia.basescan.org/tx/0x9c1653279c010f3b5b4b1dec4438d60d7deea56d00dc0512cb3d8dfc6f3c4dc4",
-      "paymasterDeployTx": "https://sepolia.basescan.org/tx/0xf37a746f0abb8396d6b273de163509fd99562cc738d8133770490e62bc96baec",
-      "registerTx": "https://sepolia.basescan.org/tx/0x9fa5eb68c10d3448ac73b47313550f8ab9bbc468e1fdb29933537cf4041cd072",
-      "fundTx": "https://sepolia.basescan.org/tx/0x623b89b9a2fe91228f0b978b288e81e24f7da10c6bb222352a3f90265e659df4"
+      "publisherRegistry": "https://sepolia.basescan.org/address/0xD1Dc9293031DB577F8f39817C35deA9Fc8024456",
+      "paymentSplitter": "https://sepolia.basescan.org/address/0x91Db1389A1cab57A01C146d43d11c205f779ED4d",
+      "reviewRegistry": "https://sepolia.basescan.org/address/0x2227db7383EE302880AD2a50745b8c61DDD14cB6",
+      "paymaster": "https://sepolia.basescan.org/address/0xddf2721Fd097Ed8e7998858C492a62d9D378626f"
     },
-    "sponsorTxHash": "0xebf1c897b0c335b76d1b7a44c47805d0a9503db7e71dfb6272b5a0810b8a0b17"
+    "sponsorTxHash": "0xebf1c897b0c335b76d1b7a44c47805d0a9503db7e71dfb6272b5a0810b8a0b17",
+    "paymentSplitter": "0x91Db1389A1cab57A01C146d43d11c205f779ED4d",
+    "reviewRegistry": "0x2227db7383EE302880AD2a50745b8c61DDD14cB6",
+    "paymentSplitterTxHash": "0x815d654156f246af3cfa25837a74fa4bfe446d497c695aa6ddeb3d84893e8958",
+    "reviewRegistryTxHash": "0xea3d90690ba64d39a9e8f62b959c69f33d2cb1621a5a95d491d9c18ed3a97cad",
+    "wireRegistryTxHash": "0xcb3914cafa02c2a05e8ce7a6ec18dea592a460c3cd61aac32090deda48588709",
+    "wireSplitterTxHash": "0x78dd2773919e0fff1c44d983e5972a33289d96ffba6609db24e7712a364cbd8e",
+    "redeployedAt": "2026-04-19T18:55:28.535Z",
+    "previous": {
+      "publisherRegistry": "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2"
+    }
   },
   "hedera": {
     "network": "hedera",

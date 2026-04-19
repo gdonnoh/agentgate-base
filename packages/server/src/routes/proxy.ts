@@ -80,7 +80,7 @@ function getCachedEndpoint(id: number): EndpointCacheEntry | null {
 }
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
-const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
+const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456") as `0x${string}`;
 const PLATFORM_WALLET = config.platformAddress as `0x${string}`;
 const PLATFORM_FEE_PCT = config.platformFeePct;
 

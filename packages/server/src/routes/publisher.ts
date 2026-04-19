@@ -26,7 +26,7 @@ import { getLivenessSummary, probeEndpointNow } from "../services/liveness";
 import { validateBackendUrl } from "../services/urlValidator";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
-const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
+const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456") as `0x${string}`;
 
 const baseSepoliaChain = defineChain({
   id: 84532, name: "Base Sepolia",

@@ -22,7 +22,7 @@ import { getLivenessSummary } from "../services/liveness";
 import { getInFlightCount } from "./proxy";
 
 // ── Contract addresses ───────────────────────────────────────────────────────
-const REGISTRY_ADDR  = "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2" as const;
+const REGISTRY_ADDR  = (process.env.PUBLISHER_REGISTRY || "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456") as `0x${string}`;
 const PAYMASTER_ADDR = "0xddf2721Fd097Ed8e7998858C492a62d9D378626f" as const;
 const ENTRYPOINT     = "0x0000000071727De22E5E9d8BAf0edAc6f37da032" as const;
 const DEPLOYER       = "0x05a7Ae061c14847e0B70f7851d76FC10289d69b0" as const;

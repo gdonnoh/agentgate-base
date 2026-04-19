@@ -39,7 +39,7 @@ if (!AGENT_PRIVATE_KEY) throw new Error("AGENT_PRIVATE_KEY not set in .env");
 if (!PIMLICO_API_KEY)   throw new Error("PIMLICO_API_KEY not set in .env");
 
 const PAYMASTER_ADDRESS  = "0xddf2721Fd097Ed8e7998858C492a62d9D378626f" as Address;
-const REGISTRY_ADDRESS   = "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2" as Address;
+const REGISTRY_ADDRESS   = "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456" as Address;
 const ENTRYPOINT_ADDRESS = entryPoint07Address; // 0x0000000071727De22E5E9d8BAf0edAc6f37da032
 
 // The endpoint being accessed — hash must match what's set in the paymaster
