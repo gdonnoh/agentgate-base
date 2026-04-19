@@ -87,21 +87,11 @@ contract ReviewRegistry is Ownable {
         _submitRating(reviewer, endpointId, publisher, score, commentHash);
     }
 
-    /**
-     * @notice Direct rating (no relayer). Caller rates directly.
-     *         Less sybil-resistant but works as fallback.
-     */
-    function rate(
-        uint256 endpointId,
-        address publisher,
-        uint8 score,
-        bytes32 commentHash
-    ) external {
-        require(score >= 1 && score <= 5, "Score must be 1-5");
-        require(msg.sender != publisher, "Cannot rate your own endpoint");
-
-        _submitRating(msg.sender, endpointId, publisher, score, commentHash);
-    }
+    // R2-I: the public `rate()` function was removed. It allowed unlimited
+    // sybil ratings (1 wallet = 1 rating, but wallet creation is free), which
+    // defeated the anti-sybil purpose of the registry. Ratings must go
+    // through rateVerified() from the trusted relayer, which gates on
+    // WorldID so each real human can only rate an endpoint once.
 
     function _submitRating(
         address reviewer,

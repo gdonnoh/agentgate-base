@@ -61,7 +61,6 @@ export interface ReviewRegistryInterface extends Interface {
       | "publisherAvgRating"
       | "publisherReviewCount"
       | "publisherTotalScore"
-      | "rate"
       | "rateVerified"
       | "renounceOwnership"
       | "setTrustedRelayer"
@@ -116,10 +115,6 @@ export interface ReviewRegistryInterface extends Interface {
   encodeFunctionData(
     functionFragment: "publisherTotalScore",
     values: [AddressLike]
-  ): string;
-  encodeFunctionData(
-    functionFragment: "rate",
-    values: [BigNumberish, AddressLike, BigNumberish, BytesLike]
   ): string;
   encodeFunctionData(
     functionFragment: "rateVerified",
@@ -183,7 +178,6 @@ export interface ReviewRegistryInterface extends Interface {
     functionFragment: "publisherTotalScore",
     data: BytesLike
   ): Result;
-  decodeFunctionResult(functionFragment: "rate", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "rateVerified",
     data: BytesLike
@@ -385,17 +379,6 @@ export interface ReviewRegistry extends BaseContract {
     "view"
   >;
 
-  rate: TypedContractMethod<
-    [
-      endpointId: BigNumberish,
-      publisher: AddressLike,
-      score: BigNumberish,
-      commentHash: BytesLike
-    ],
-    [void],
-    "nonpayable"
-  >;
-
   rateVerified: TypedContractMethod<
     [
       reviewer: AddressLike,
@@ -481,18 +464,6 @@ export interface ReviewRegistry extends BaseContract {
   getFunction(
     nameOrSignature: "publisherTotalScore"
   ): TypedContractMethod<[arg0: AddressLike], [bigint], "view">;
-  getFunction(
-    nameOrSignature: "rate"
-  ): TypedContractMethod<
-    [
-      endpointId: BigNumberish,
-      publisher: AddressLike,
-      score: BigNumberish,
-      commentHash: BytesLike
-    ],
-    [void],
-    "nonpayable"
-  >;
   getFunction(
     nameOrSignature: "rateVerified"
   ): TypedContractMethod<

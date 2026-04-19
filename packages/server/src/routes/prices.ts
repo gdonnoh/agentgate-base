@@ -39,8 +39,8 @@ router.get("/:token", (c) => {
     last_updated: new Date().toISOString(),
     sponsored_by: config.publisherAddress,
     agent_verified: true,
-    payment: "~$0.005 in HBAR",
-    network: "Hedera Testnet (eip155:296)",
+    payment: "~$0.005 in USDC",
+    network: "Base Sepolia (eip155:84532)",
   });
 });
 

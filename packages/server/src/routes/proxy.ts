@@ -84,8 +84,8 @@ const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9
 const PLATFORM_WALLET = config.platformAddress as `0x${string}`;
 const PLATFORM_FEE_PCT = config.platformFeePct;
 
-// Replay protection for browser direct-transfer payments
-const usedBrowserTxHashes = new Set<string>();
+// Browser direct-transfer tx-hash dedup lives in `proxyStore` (Postgres +
+// in-memory hot cache). This local Set is no longer used — see FIX 3.
 
 const baseSepoliaChain = defineChain({
   id: 84532, name: "Base Sepolia",
@@ -116,6 +116,91 @@ const REGISTRY_ABI = [
 
 const facilitator = new HTTPFacilitatorClient({ url: "https://www.x402.org/facilitator" });
 
+// ── Ollama path whitelist (R2-A) ─────────────────────────────────────────────
+// When the proxy forwards a request it appends the request's path suffix to
+// the backendUrl. Without validation this lets buyers reach /api/pull or
+// /api/delete on a self-hosted Ollama, which are admin endpoints. We allow
+// only the inference + OpenAI-compatible paths. Empty suffix is allowed iff
+// the backend already includes a full path (e.g. upstream points at
+// https://host/api/chat directly) — we detect that by checking backendUrl
+// already ends with one of the allowed endpoints.
+const DEFAULT_ALLOWED_PATHS = [
+  "/api/chat",
+  "/api/generate",
+  "/api/embeddings",
+  "/api/embed",
+  "/v1/",     // OpenAI-compatible: /v1/chat/completions, /v1/embeddings, etc.
+];
+
+/** Return true if the suffix is allowed by the endpoint's whitelist.
+ *  `suffix` is what we'd append to backendUrl (starts with "/" or is ""). */
+function isAllowedProxySuffix(
+  suffix: string,
+  backendUrl: string,
+  allowedPaths: string[] = DEFAULT_ALLOWED_PATHS,
+): boolean {
+  // Reject path traversal attempts outright.
+  if (suffix.includes("..")) return false;
+
+  // Empty suffix is allowed ONLY when the backendUrl already has a full path
+  // (so it's pointing at a specific API endpoint, not the Ollama root).
+  if (suffix === "" || suffix === "/") {
+    try {
+      const u = new URL(backendUrl);
+      // Any non-trivial path on the backend implies "already targeted" — e.g.
+      // https://host/api/chat or https://host/v1/chat/completions.
+      return u.pathname !== "" && u.pathname !== "/";
+    } catch { return false; }
+  }
+
+  // Must match one of the allowed prefixes exactly or as a subpath.
+  for (const allowed of allowedPaths) {
+    if (allowed.endsWith("/")) {
+      // Prefix match (e.g. /v1/* covers any /v1/...)
+      if (suffix === allowed.slice(0, -1) || suffix.startsWith(allowed)) return true;
+    } else {
+      if (suffix === allowed || suffix.startsWith(allowed + "/")) return true;
+    }
+  }
+  return false;
+}
+
+// ── Ollama body field whitelist (R2-C) ───────────────────────────────────────
+// Prevent callers from injecting DoS parameters like `num_ctx: 999999` or
+// pulling in unknown fields that upstream Ollama might forward to weird
+// subsystems. Everything outside these sets is stripped silently.
+const ALLOWED_BODY_FIELDS = new Set([
+  "model", "messages", "prompt", "system",
+  "options", "stream", "format", "template",
+  // OpenAI / Anthropic compatibility — keep benign commonly-used fields.
+  "max_tokens", "temperature", "top_p", "top_k", "stop", "seed",
+  "presence_penalty", "frequency_penalty", "n",
+]);
+const ALLOWED_OPTIONS_FIELDS = new Set([
+  "num_predict", "temperature", "top_k", "top_p",
+  "repeat_penalty", "seed", "stop",
+]);
+
+function sanitizeRequestBody(parsed: any): any {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+  const out: any = {};
+  for (const k of Object.keys(parsed)) {
+    if (!ALLOWED_BODY_FIELDS.has(k)) continue;
+    if (k === "options" && parsed.options && typeof parsed.options === "object") {
+      const filtered: any = {};
+      for (const ok of Object.keys(parsed.options)) {
+        if (ALLOWED_OPTIONS_FIELDS.has(ok)) filtered[ok] = parsed.options[ok];
+      }
+      out.options = filtered;
+    } else {
+      out[k] = parsed[k];
+    }
+  }
+  return out;
+}
+
+// ── Upstream response size cap (R2-B) ────────────────────────────────────────
+const MAX_UPSTREAM_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 const router = new Hono();
 
@@ -133,9 +218,40 @@ async function forwardToUpstream(
   bodyOverride?: ArrayBuffer | Uint8Array,
 ): Promise<Response> {
   const method     = c.req.method;
-  const bodyBuffer = bodyOverride !== undefined
-    ? bodyOverride
-    : (method !== "GET" && method !== "HEAD" ? await c.req.arrayBuffer() : undefined);
+
+  const rawPath  = c.req.path;
+  const suffix   = rawPath.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
+
+  // ── Path whitelist (R2-A) ──
+  // Reject admin / management Ollama paths BEFORE doing any upstream work.
+  const allowedPaths = Array.isArray(proxyConfig.allowedPaths) && proxyConfig.allowedPaths.length > 0
+    ? proxyConfig.allowedPaths
+    : DEFAULT_ALLOWED_PATHS;
+  if (!isAllowedProxySuffix(suffix, proxyConfig.backendUrl, allowedPaths)) {
+    console.warn(`[proxy] ⛔  Blocked path for endpoint #${endpointId}: "${suffix}"`);
+    return c.json({ error: "Path not allowed" }, 403);
+  }
+
+  let bodyBuffer: ArrayBuffer | Uint8Array | undefined;
+  if (bodyOverride !== undefined) {
+    bodyBuffer = bodyOverride;
+  } else if (method !== "GET" && method !== "HEAD") {
+    // Read body and apply Ollama field whitelist (R2-C). We only sanitize
+    // JSON bodies; everything else is forwarded as-is.
+    const raw = await c.req.arrayBuffer();
+    const ct = (c.req.header("content-type") || "").toLowerCase();
+    if (ct.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(raw));
+        const sanitized = sanitizeRequestBody(parsed);
+        bodyBuffer = new TextEncoder().encode(JSON.stringify(sanitized));
+      } catch {
+        bodyBuffer = raw; // non-JSON shaped body — pass through
+      }
+    } else {
+      bodyBuffer = raw;
+    }
+  }
 
   const upstreamHeaders: Record<string, string> = {};
   const ct = c.req.header("content-type");
@@ -147,8 +263,6 @@ async function forwardToUpstream(
     upstreamHeaders[k.toLowerCase()] = v;
   }
 
-  const rawPath  = c.req.path;
-  const suffix   = rawPath.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
   const upstream = proxyConfig.backendUrl.replace(/\/$/, "") + suffix;
   const qs       = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
 
@@ -161,9 +275,52 @@ async function forwardToUpstream(
   }
 
   console.log(`[proxy] ← upstream ${upstreamRes.status} for endpoint #${endpointId} → ${upstream}`);
-  const upstreamBody = await upstreamRes.arrayBuffer();
+
+  // ── Response size cap (R2-B) ──
+  // Layer 1: content-length check. Reject early if upstream declares a body
+  // larger than our cap.
+  const clHeader = upstreamRes.headers.get("content-length");
+  if (clHeader) {
+    const declared = Number(clHeader);
+    if (Number.isFinite(declared) && declared > MAX_UPSTREAM_RESPONSE_BYTES) {
+      console.warn(`[proxy] ⛔  Upstream declared ${declared} bytes for endpoint #${endpointId} — cap is ${MAX_UPSTREAM_RESPONSE_BYTES}`);
+      return c.json({ error: "Upstream response too large" }, 413);
+    }
+  }
+
+  // Layer 2: streaming byte counter. Abort the read if we exceed the cap
+  // even when content-length wasn't set (chunked / streaming responses).
+  const body = upstreamRes.body;
+  let captured: Uint8Array;
+  if (!body) {
+    captured = new Uint8Array(0);
+  } else {
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > MAX_UPSTREAM_RESPONSE_BYTES) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          console.warn(`[proxy] ⛔  Upstream body exceeded ${MAX_UPSTREAM_RESPONSE_BYTES} bytes for endpoint #${endpointId}`);
+          return c.json({ error: "Upstream response too large" }, 413);
+        }
+        chunks.push(value);
+      }
+    }
+    captured = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      captured.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+  }
+
   const upCt = upstreamRes.headers.get("content-type") || "application/json";
-  return new Response(upstreamBody, { status: upstreamRes.status, headers: { "content-type": upCt } });
+  return new Response(captured, { status: upstreamRes.status, headers: { "content-type": upCt } });
 }
 
 /**
@@ -172,6 +329,28 @@ async function forwardToUpstream(
  */
 function usdToUsdcUnits(usdAmount: number): string {
   return Math.ceil(usdAmount * 1_000_000).toString();
+}
+
+/**
+ * Return the canonical absolute URL for the incoming request, honouring
+ * `X-Forwarded-Proto` when we're behind a reverse proxy (Render, Cloudflare).
+ *
+ * `c.req.url` on a Node adapter can still be an `http://` URL even after TLS
+ * termination at the edge, which would leak into the x402 402 challenge body
+ * and trick clients into replaying payments against a plaintext URL. Prefer
+ * the forwarded proto; otherwise pick https in production, http only in dev.
+ */
+function resolveResourceUrl(c: any): string {
+  try {
+    const orig = new URL(c.req.url);
+    const fwdProto = (c.req.header("x-forwarded-proto") || "").split(",")[0].trim().toLowerCase();
+    const host = c.req.header("host") || orig.host;
+    const isDev = process.env.NODE_ENV !== "production";
+    const proto = fwdProto || (isDev && host.includes("localhost") ? "http" : "https");
+    return `${proto}://${host}${orig.pathname}${orig.search}`;
+  } catch {
+    return c.req.url;
+  }
 }
 
 /**
@@ -293,6 +472,21 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   const paymentTimeoutSeconds =
     proxyConfig.paymentTimeoutSeconds ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS;
 
+  // ── Path whitelist pre-flight (R2-A) ──
+  // Reject admin / management paths BEFORE any payment processing so callers
+  // are never charged when their target is blocked. forwardToUpstream checks
+  // this too as a defence-in-depth — the callers via the free-trial path also
+  // must go through that gate.
+  const rawPath0 = c.req.path;
+  const suffix0  = rawPath0.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
+  const allowedPathsCfg = Array.isArray(proxyConfig.allowedPaths) && proxyConfig.allowedPaths.length > 0
+    ? proxyConfig.allowedPaths
+    : DEFAULT_ALLOWED_PATHS;
+  if (proxyConfig.backendUrl && !isAllowedProxySuffix(suffix0, proxyConfig.backendUrl, allowedPathsCfg)) {
+    console.warn(`[proxy] ⛔  Blocked path for endpoint #${endpointId}: "${suffix0}"`);
+    return c.json({ error: "Path not allowed" }, 403);
+  }
+
   // 2. Read endpoint from chain to get price + publisher address
   //    Uses a short-lived in-memory cache to avoid a viem round-trip on
   //    every single paid call — saves ~0.5-1.5s per request.
@@ -384,7 +578,9 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
         if (typeof parsed.max_tokens === "number") {
           parsed.max_tokens = Math.min(parsed.max_tokens, perTokenMaxOutput);
         }
-        upstreamBodyOverride = new TextEncoder().encode(JSON.stringify(parsed));
+        // Apply top-level + options whitelist (R2-C) before re-encoding.
+        const sanitized = sanitizeRequestBody(parsed);
+        upstreamBodyOverride = new TextEncoder().encode(JSON.stringify(sanitized));
       } else {
         upstreamBodyOverride = new Uint8Array(rawBuf);
       }
@@ -443,7 +639,7 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
         scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET,
         maxAmountRequired: amount, asset: USDC_ADDRESS,
         extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
-        resource: c.req.url, description: proxyConfig.name, maxTimeoutSeconds: paymentTimeoutSeconds,
+        resource: resolveResourceUrl(c), description: proxyConfig.name, maxTimeoutSeconds: paymentTimeoutSeconds,
       }],
       requireWorldId: true,
       worldIdInfo: "This endpoint requires WorldID. Include a valid `agentkit` header. Verified agents get 3 free calls.",
@@ -457,11 +653,34 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   const browserFrom = c.req.header("x-payment-from");
   if (browserTxHash && browserFrom) {
     try {
+      // Reject replays BEFORE we do any RPC work — cheap win.
+      if (await proxyStore.isTxHashUsed(browserTxHash)) {
+        return c.json({ error: "Payment tx already used" }, 402);
+      }
+
       const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
       const receipt = await client.getTransactionReceipt({ hash: browserTxHash as `0x${string}` });
 
       if (receipt.status !== "success") {
         return c.json({ error: "Payment transaction failed on-chain" }, 402);
+      }
+
+      // Confirmation-depth check: a freshly-mined tx can be reorged away.
+      // Require 2 confirmations (i.e. at least one block BEYOND the receipt
+      // block) before we accept the payment. This is cheap because we already
+      // have a client, and it drastically reduces the replay-after-reorg
+      // attack window. On Base Sepolia 2s blocks make this ~4s of extra wait
+      // in the worst case.
+      const latest = await client.getBlockNumber();
+      if (latest - receipt.blockNumber < 2n) {
+        return c.json(
+          {
+            error: "Tx needs 2 confirmations — retry in a few seconds",
+            txBlock: receipt.blockNumber.toString(),
+            latestBlock: latest.toString(),
+          },
+          425 // "Too Early"
+        );
       }
 
       // Parse USDC Transfer event: Transfer(from, to, amount)
@@ -480,11 +699,14 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
         return c.json({ error: "Payment tx does not contain matching USDC transfer" }, 402);
       }
 
-      // Replay protection: check we haven't processed this tx before
-      if (usedBrowserTxHashes.has(browserTxHash)) {
+      // Replay protection: persistent dedup via proxyStore (Postgres-backed
+      // with an in-memory hot cache). The pre-flight check at the top of the
+      // try block already covered this, but we re-check + mark here so the
+      // "check" and "mark" sit right around the credit operation.
+      if (await proxyStore.isTxHashUsed(browserTxHash)) {
         return c.json({ error: "Payment tx already used" }, 402);
       }
-      usedBrowserTxHashes.add(browserTxHash);
+      await proxyStore.markTxHashUsed(browserTxHash);
 
       const platformFee = priceUsd * (PLATFORM_FEE_PCT / 100);
       const publisherNet = priceUsd - platformFee;
@@ -513,7 +735,7 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
       amount,
       asset:   USDC_ADDRESS,
       extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" },
-      resource: c.req.url,
+      resource: resolveResourceUrl(c),
       description: proxyConfig.name,
       maxTimeoutSeconds: paymentTimeoutSeconds,
     }];
@@ -600,7 +822,7 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   }
 
   const amount         = usdToUsdcUnits(priceUsd);
-  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: paymentTimeoutSeconds, resource: c.req.url };
+  const requirements   = { scheme: "exact", network: "eip155:84532", payTo: PLATFORM_WALLET, maxAmountRequired: amount, amount, asset: USDC_ADDRESS, extra: { name: "USDC", version: "2", decimals: 6, assetTransferMethod: "permit2" }, maxTimeoutSeconds: paymentTimeoutSeconds, resource: resolveResourceUrl(c) };
 
   let verifyResult: any;
   try {
@@ -616,6 +838,69 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
   if (!verifyResult?.isValid) {
     console.warn(`[proxy] Payment invalid for endpoint #${endpointId}: ${verifyResult?.invalidReason}`);
     return c.json({ error: `Payment invalid: ${verifyResult?.invalidReason || "unknown"}` }, 402);
+  }
+
+  // ── Bind AgentKit address to x402 payer (R2-D) ──
+  // When both an `agentkit` header was verified AND an x402 payment signature
+  // is present, require the two addresses to match. Otherwise a buyer could
+  // use someone else's WorldID delegation to get WorldID-gated access while
+  // paying from their own wallet (or vice versa). We probe the common x402 v2
+  // payload paths for the payer address and log the payload shape if we can't
+  // locate it, so production telemetry tightens this over time.
+  if (worldIdVerified && worldIdAddress) {
+    const auth = paymentPayload?.payload?.authorization ?? paymentPayload?.authorization ?? null;
+    const payerAddress: string | undefined =
+      auth?.from ?? auth?.owner ?? auth?.signer ??
+      paymentPayload?.payload?.from ?? paymentPayload?.from;
+    if (typeof payerAddress === "string" && payerAddress.length > 0) {
+      if (worldIdAddress.toLowerCase() !== payerAddress.toLowerCase()) {
+        console.warn(
+          `[proxy] ⛔  AgentKit/payer mismatch for endpoint #${endpointId}: agentkit=${worldIdAddress} payer=${payerAddress}`
+        );
+        return c.json({ error: "AgentKit wallet must match payment signer" }, 403);
+      }
+    } else {
+      // Payload shape unknown — warn so we can tighten this in a follow-up once
+      // we've logged real-world payloads. Don't reject (avoid false positives).
+      console.warn(
+        `[proxy] agentkit/payer bind: could not locate payer address in payload; ` +
+        `authorization keys=${auth ? Object.keys(auth).join(",") : "none"}`
+      );
+    }
+  }
+
+  // Belt-and-braces: facilitator.verify already enforces the requirements, but
+  // we re-assert the `authorization.value >= maxAmountRequired` condition on
+  // our side so a facilitator bug (or a swapped facilitator) can never let an
+  // underpaid call through. x402 v2 puts the amount under
+  //   paymentPayload.payload.authorization.value  (permit2 / EIP-3009)
+  // Older shapes use `authorization.amount` or `payload.amount`. We probe a
+  // few likely places and, if we find *a* number, assert it. If we can't find
+  // it we log a TODO and move on (we'd rather err toward "accept" for known
+  // payloads the facilitator already said are OK than reject valid calls).
+  try {
+    const auth = paymentPayload?.payload?.authorization ?? paymentPayload?.authorization ?? null;
+    const rawAmount =
+      auth?.value ?? auth?.amount ?? paymentPayload?.payload?.value ?? paymentPayload?.payload?.amount;
+    if (rawAmount !== undefined && rawAmount !== null) {
+      const paid = BigInt(rawAmount);
+      const required = BigInt(requirements.maxAmountRequired || (requirements as any).amount);
+      if (paid < required) {
+        console.warn(`[proxy] Underpaid for endpoint #${endpointId}: paid=${paid} required=${required}`);
+        return c.json(
+          { error: `Payment amount ${paid} is less than required ${required}` },
+          402
+        );
+      }
+    } else {
+      // TODO: once we've logged the real shape of x402 v2 payloads in prod,
+      // tighten this to require a known field path rather than best-effort.
+      console.warn(
+        `[proxy] amount-assert: could not locate authorization.value in payload, skipping check. Payload keys: ${Object.keys(paymentPayload || {}).join(",")}`
+      );
+    }
+  } catch (e: any) {
+    console.warn(`[proxy] amount-assert threw for endpoint #${endpointId}: ${e?.message || e}`);
   }
 
   const platformFee = priceUsd * (PLATFORM_FEE_PCT / 100);

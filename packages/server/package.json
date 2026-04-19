@@ -10,7 +10,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.12",
+    "@hono/node-server": "^1.19.14",
     "@worldcoin/agentkit": "^0.1.6",
     "@x402/core": "^2.9.0",
     "@x402/evm": "^2.9.0",
@@ -19,7 +19,7 @@
     "dotenv": "^16.6.1",
     "ethers": "^6.16.0",
     "express": "^4.18.0",
-    "hono": "^4.12.10",
+    "hono": "^4.12.14",
     "pg": "^8.20.0",
     "viem": "^2.47.6"
   },

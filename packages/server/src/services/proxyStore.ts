@@ -62,6 +62,21 @@ export interface ProxyConfig {
   maxInputTokens?: number;
   /** Max output tokens (injected as num_predict in the upstream body). */
   maxOutputTokens?: number;
+  /**
+   * Optional per-endpoint override of the proxy path whitelist. When unset,
+   * the proxy uses DEFAULT_ALLOWED_PATHS (inference + OpenAI-compat paths).
+   * Entries ending in "/" are treated as prefix matches (e.g. "/v1/" matches
+   * "/v1/chat/completions"). Path traversal (".." in suffix) is always
+   * rejected regardless of this list.
+   */
+  allowedPaths?: string[];
+  /**
+   * Last time a tunnel token was successfully used via set-tunnel. Updated
+   * atomically with token rotation so replay attempts don't race. Serves as
+   * a heartbeat marker too — an old stale token with no recent use gets
+   * invalidated on next login.
+   */
+  tunnelTokenUsedAt?: number;
 }
 
 export const DEFAULT_MAX_CONCURRENT = 3;
@@ -98,6 +113,38 @@ interface CallRecord {
 const endpointCalls = new Map<number, CallRecord[]>();
 const FREE_TRIAL_LIMIT = 3;
 const freeTrialUsage = new Map<string, number>();
+
+// Hot cache for tx-hash replay protection. Backed by the `used_tx_hashes`
+// Postgres table when POSTGRES_URL is set; the cache alone handles the
+// file-backend / local-dev case.
+//
+// Map<txHash, insertedAtMs> so we can evict entries older than 7 days and
+// keep the Map bounded. Postgres remains the source of truth for anything
+// not currently hot in RAM.
+const usedTxHashCache = new Map<string, number>();
+const USED_TX_CACHE_MAX = 100_000;
+const USED_TX_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const USED_TX_CACHE_CLEAN_INTERVAL_MS = 10 * 60 * 1000;
+
+function pruneUsedTxHashCache() {
+  const now = Date.now();
+  // Drop expired entries.
+  for (const [k, ts] of usedTxHashCache) {
+    if (now - ts > USED_TX_CACHE_TTL_MS) usedTxHashCache.delete(k);
+  }
+  // Bound size: evict oldest N entries until we're under the cap. Map
+  // iteration order is insertion order, so the first keys are the oldest.
+  while (usedTxHashCache.size > USED_TX_CACHE_MAX) {
+    const first = usedTxHashCache.keys().next().value;
+    if (first === undefined) break;
+    usedTxHashCache.delete(first);
+  }
+}
+
+// Periodic cleanup. `unref()` so the timer doesn't keep the process alive
+// during graceful shutdown / tests.
+const usedTxCleanupTimer = setInterval(pruneUsedTxHashCache, USED_TX_CACHE_CLEAN_INTERVAL_MS);
+if (typeof usedTxCleanupTimer.unref === "function") usedTxCleanupTimer.unref();
 
 export const callTracker = {
   record(endpointId: number, agentAddress: string, freeTrial: boolean, priceUsd = 0, platformFeePct = 5) {
@@ -142,8 +189,14 @@ export const callTracker = {
   },
 
   consumeFreeTrial(agentAddress: string, endpointId: number): void {
-    const key = `${agentAddress.toLowerCase()}:${endpointId}`;
-    freeTrialUsage.set(key, (freeTrialUsage.get(key) || 0) + 1);
+    const addr = agentAddress.toLowerCase();
+    const key = `${addr}:${endpointId}`;
+    const next = (freeTrialUsage.get(key) || 0) + 1;
+    freeTrialUsage.set(key, next);
+    if (usePostgres) {
+      pgUpsertFreeTrial(addr, endpointId, next)
+        .catch(e => console.warn("[callTracker] pgUpsertFreeTrial error:", e.message));
+    }
   },
 
   getAllStats() {
@@ -260,6 +313,25 @@ async function initPostgres() {
     await pgPool.query(
       "CREATE INDEX IF NOT EXISTS idx_proxy_calls_endpoint ON proxy_calls(endpoint_id)"
     );
+    // Replay protection: remember which tx hashes we've already credited so
+    // a buyer can't re-use the same on-chain transfer twice across restarts.
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS used_tx_hashes (
+        tx_hash TEXT PRIMARY KEY,
+        used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    // Persistent free-trial counters — the in-memory freeTrialUsage Map was
+    // rebuilt from `proxy_calls` on boot, but once we prune old call rows or
+    // migrate to per-agent accounting this table becomes the source of truth.
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS free_trial_usage (
+        agent_address TEXT NOT NULL,
+        endpoint_id   BIGINT NOT NULL,
+        count         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_address, endpoint_id)
+      )
+    `);
     // Hidden endpoints — a publisher flagging their own endpoint as hidden
     // removes it from their Manage list and from the public dashboard. The
     // endpoint itself stays on-chain (we can't burn it) and the proxy still
@@ -330,6 +402,30 @@ async function initPostgres() {
       hiddenByPublisher.set(addr, set);
     }
 
+    // Hydrate the hot cache of used tx hashes so /api/proxy can reject replays
+    // without a DB round-trip on every call. We cap the hydration at
+    // USED_TX_CACHE_MAX rows so startup stays O(1) in memory; older entries
+    // still live in Postgres and the async fallback path picks them up.
+    const { rows: txRows } = await pgPool.query(
+      "SELECT tx_hash, used_at FROM used_tx_hashes ORDER BY used_at DESC LIMIT $1",
+      [USED_TX_CACHE_MAX]
+    );
+    for (const row of txRows) {
+      usedTxHashCache.set(String(row.tx_hash).toLowerCase(), new Date(row.used_at).getTime());
+    }
+
+    // Hydrate the free-trial counter map. Prefer the dedicated table (source
+    // of truth) and fall back to the call-log count we built above if a row
+    // is missing — during the first deploy after this migration the new table
+    // is empty.
+    const { rows: ftRows } = await pgPool.query(
+      "SELECT agent_address, endpoint_id, count FROM free_trial_usage"
+    );
+    for (const row of ftRows) {
+      const key = `${String(row.agent_address).toLowerCase()}:${row.endpoint_id}`;
+      freeTrialUsage.set(key, Number(row.count));
+    }
+
     console.log(
       `[proxyStore] PostgreSQL connected — loaded ${cache.size} configs, ${callRows.length} call records, ${hiddenRows.length} hidden entries`
     );
@@ -386,6 +482,33 @@ async function pgSet(config: ProxyConfig) {
 async function pgDelete(endpointId: number) {
   if (!pgPool) return;
   await pgPool.query("DELETE FROM proxy_configs WHERE endpoint_id = $1", [endpointId]);
+}
+
+async function pgMarkTxHashUsed(txHash: string) {
+  if (!pgPool) return;
+  await pgPool.query(
+    `INSERT INTO used_tx_hashes (tx_hash) VALUES ($1)
+       ON CONFLICT (tx_hash) DO NOTHING`,
+    [txHash]
+  );
+}
+
+async function pgIsTxHashUsed(txHash: string): Promise<boolean> {
+  if (!pgPool) return false;
+  const { rows } = await pgPool.query(
+    "SELECT 1 FROM used_tx_hashes WHERE tx_hash = $1 LIMIT 1",
+    [txHash]
+  );
+  return rows.length > 0;
+}
+
+async function pgUpsertFreeTrial(agentAddress: string, endpointId: number, count: number) {
+  if (!pgPool) return;
+  await pgPool.query(
+    `INSERT INTO free_trial_usage (agent_address, endpoint_id, count) VALUES ($1, $2, $3)
+       ON CONFLICT (agent_address, endpoint_id) DO UPDATE SET count = EXCLUDED.count`,
+    [agentAddress, endpointId, count]
+  );
 }
 
 // ── File backend (local dev fallback) ───────────────────────────────────────
@@ -475,6 +598,38 @@ export const proxyStore = {
       if (config.tunnelToken && config.tunnelToken === token) return config;
     }
     return undefined;
+  },
+
+  /**
+   * True if we've already credited this browser tx hash to an endpoint call.
+   * Hot path hits the in-memory Set; when that misses we fall through to
+   * Postgres so a server restart never re-opens an already-spent tx.
+   */
+  async isTxHashUsed(txHash: string): Promise<boolean> {
+    const h = txHash.toLowerCase();
+    if (usedTxHashCache.has(h)) return true;
+    if (!usePostgres) return false;
+    try {
+      const used = await pgIsTxHashUsed(h);
+      if (used) usedTxHashCache.set(h, Date.now());
+      return used;
+    } catch (e: any) {
+      console.warn("[proxyStore] pgIsTxHashUsed error:", e.message);
+      return false;
+    }
+  },
+
+  /** Mark a browser tx hash as spent. In-memory first, then best-effort DB write. */
+  async markTxHashUsed(txHash: string): Promise<void> {
+    const h = txHash.toLowerCase();
+    usedTxHashCache.set(h, Date.now());
+    if (usePostgres) {
+      try {
+        await pgMarkTxHashUsed(h);
+      } catch (e: any) {
+        console.warn("[proxyStore] pgMarkTxHashUsed error:", e.message);
+      }
+    }
   },
 };
 

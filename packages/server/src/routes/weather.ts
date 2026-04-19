@@ -32,8 +32,8 @@ router.get("/:city", (c) => {
     ...weather,
     sponsored_by: config.publisherAddress,
     agent_verified: true,
-    payment: "~$0.01 in HBAR",
-    network: "Hedera Testnet (eip155:296)",
+    payment: "~$0.01 in USDC",
+    network: "Base Sepolia (eip155:84532)",
   });
 });
 

@@ -1856,8 +1856,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/PublisherRegistry.sol": {
-      "lastModificationDate": 1775638784128,
-      "contentHash": "fec427718081407ccfe24a8b76ddee6f",
+      "lastModificationDate": 1776594885018,
+      "contentHash": "8c0d80bec0777aca777922668f2d601c",
       "sourceName": "contracts/PublisherRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -1891,6 +1891,7 @@
         "^0.8.24"
       ],
       "artifacts": [
+        "IPaymentSplitter",
         "PublisherRegistry"
       ]
     },
@@ -1967,8 +1968,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/PaymentSplitter.sol": {
-      "lastModificationDate": 1775548935720,
-      "contentHash": "56a8d46ecc222ea40a6219c4b3969913",
+      "lastModificationDate": 1776594856409,
+      "contentHash": "4d82a0d8f09d16e2f1fdacb1a8218a26",
       "sourceName": "contracts/PaymentSplitter.sol",
       "solcConfig": {
         "version": "0.8.24",
@@ -2042,8 +2043,8 @@
       ]
     },
     "/Users/gdonnoh/Desktop/agentgate-base/packages/contracts/contracts/ReviewRegistry.sol": {
-      "lastModificationDate": 1775548895180,
-      "contentHash": "81bc2f5088f840b5ead6f8f7bddfc2d8",
+      "lastModificationDate": 1776594902690,
+      "contentHash": "e9e2bace6e1a4ec17e18318f864c8303",
       "sourceName": "contracts/ReviewRegistry.sol",
       "solcConfig": {
         "version": "0.8.24",

@@ -9,10 +9,20 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * @notice Registry for API publishers and their x402-protected endpoints.
  *         Publishers pay a one-time USDC publishing fee to register an endpoint.
  */
+/// @notice Minimal interface for the PaymentSplitter hook.
+interface IPaymentSplitter {
+    function registerPublisher(uint256 endpointId, address publisher) external;
+}
+
 contract PublisherRegistry is Ownable {
     IERC20 public immutable usdc;
     address public platformWallet;
     uint256 public publishingFee; // USDC 6 decimals (e.g. 1_000_000 = 1 USDC)
+
+    /// @notice Optional PaymentSplitter address. When set, registerEndpoint
+    ///         forwards publisher claims to it so nobody else can claim the
+    ///         endpoint's future payments (R2-H).
+    address public paymentSplitter;
     struct Endpoint {
         uint256 id;
         address publisher;
@@ -49,6 +59,7 @@ contract PublisherRegistry is Ownable {
     event PublishingFeePaid(uint256 indexed id, address indexed publisher, uint256 amount);
     event PublishingFeeUpdated(uint256 oldFee, uint256 newFee);
     event PlatformWalletUpdated(address oldWallet, address newWallet);
+    event PaymentSplitterUpdated(address oldSplitter, address newSplitter);
 
     constructor(address _usdc, address _platformWallet, uint256 _publishingFee) Ownable(msg.sender) {
         require(_usdc != address(0), "Invalid USDC");
@@ -61,6 +72,13 @@ contract PublisherRegistry is Ownable {
     /// @notice Authorize a server/relayer address to call recordCall.
     function setTrustedCaller(address _caller) external onlyOwner {
         trustedCaller = _caller;
+    }
+
+    /// @notice Configure the PaymentSplitter that tracks publisher-of-record
+    ///         per endpoint. Owner-only. Pass address(0) to disable the hook.
+    function setPaymentSplitter(address _splitter) external onlyOwner {
+        emit PaymentSplitterUpdated(paymentSplitter, _splitter);
+        paymentSplitter = _splitter;
     }
 
     modifier onlyPublisher(uint256 endpointId) {
@@ -104,6 +122,13 @@ contract PublisherRegistry is Ownable {
         });
 
         publisherEndpoints[msg.sender].push(id);
+
+        // R2-H: forward the publisher claim to the splitter if configured, so
+        // only this Registry (not arbitrary callers) can bind an endpoint to
+        // a publisher wallet on the splitter.
+        if (paymentSplitter != address(0)) {
+            IPaymentSplitter(paymentSplitter).registerPublisher(id, msg.sender);
+        }
 
         emit EndpointRegistered(id, msg.sender, url, pricePerCall, paymasterAddress);
         if (publishingFee > 0) {

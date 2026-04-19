@@ -98,6 +98,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.PaymentSplitter__factory>;
     getContractFactory(
+      name: "IPaymentSplitter",
+      signerOrOptions?: ethers.Signer | FactoryOptions
+    ): Promise<Contracts.IPaymentSplitter__factory>;
+    getContractFactory(
       name: "PublisherRegistry",
       signerOrOptions?: ethers.Signer | FactoryOptions
     ): Promise<Contracts.PublisherRegistry__factory>;
@@ -212,6 +216,11 @@ declare module "hardhat/types/runtime" {
       signer?: ethers.Signer
     ): Promise<Contracts.PaymentSplitter>;
     getContractAt(
+      name: "IPaymentSplitter",
+      address: string | ethers.Addressable,
+      signer?: ethers.Signer
+    ): Promise<Contracts.IPaymentSplitter>;
+    getContractAt(
       name: "PublisherRegistry",
       address: string | ethers.Addressable,
       signer?: ethers.Signer
@@ -307,6 +316,10 @@ declare module "hardhat/types/runtime" {
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.PaymentSplitter>;
     deployContract(
+      name: "IPaymentSplitter",
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IPaymentSplitter>;
+    deployContract(
       name: "PublisherRegistry",
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.PublisherRegistry>;
@@ -420,6 +433,11 @@ declare module "hardhat/types/runtime" {
       args: any[],
       signerOrOptions?: ethers.Signer | DeployContractOptions
     ): Promise<Contracts.PaymentSplitter>;
+    deployContract(
+      name: "IPaymentSplitter",
+      args: any[],
+      signerOrOptions?: ethers.Signer | DeployContractOptions
+    ): Promise<Contracts.IPaymentSplitter>;
     deployContract(
       name: "PublisherRegistry",
       args: any[],

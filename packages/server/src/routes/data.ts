@@ -387,6 +387,13 @@ dataRouter.get("/overview", async (c) => {
  *
  * Returns all endpoints registered by a specific publisher address,
  * enriched with paymaster data and proxy call stats.
+ *
+ * SECURITY (R2-J): this route used to include `backendUrl`, `name`, and any
+ * injected auth headers in its responses. Anyone on the internet could curl
+ * it with a known publisher address and scrape every upstream URL in the
+ * system. We now strip those fields unconditionally — the publisher's own
+ * dashboard uses authenticated `/api/publisher/proxy-config/:id` calls to
+ * read its private config, so no legitimate UI path is affected.
  */
 dataRouter.get("/publisher/:address", async (c) => {
   const address = c.req.param("address") as `0x${string}`;
@@ -416,11 +423,12 @@ dataRouter.get("/publisher/:address", async (c) => {
           }
         }
 
-        // proxyStats is already attached by readEndpoint(). Include the
-        // hidden flag so the publisher can see which endpoints they've
-        // hidden themselves and un-hide them from the Manage UI.
+        // R2-J: strip the sensitive fields (backendUrl, name, anything else
+        // leaking private config). We keep proxyStats + paymaster + hidden
+        // because those are already-public by way of on-chain events.
+        const redacted = redactPrivateEndpointFields(ep);
         return {
-          ...ep,
+          ...redacted,
           paymaster: paymasterData,
           hidden: hiddenEndpoints.isHidden(id, address),
         };

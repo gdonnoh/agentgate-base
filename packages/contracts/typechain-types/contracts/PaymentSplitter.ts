@@ -35,9 +35,11 @@ export interface PaymentSplitterInterface extends Interface {
       | "platformWallet"
       | "publisherEarnings"
       | "registerPublisher"
+      | "registryAddress"
       | "renounceOwnership"
       | "setPlatformFee"
       | "setPlatformWallet"
+      | "setRegistryAddress"
       | "totalPayments"
       | "totalPlatformRevenue"
       | "transferOwnership"
@@ -51,6 +53,7 @@ export interface PaymentSplitterInterface extends Interface {
       | "PlatformFeeUpdated"
       | "PlatformWalletUpdated"
       | "PublisherRegistered"
+      | "RegistryAddressUpdated"
   ): EventFragment;
 
   encodeFunctionData(
@@ -87,6 +90,10 @@ export interface PaymentSplitterInterface extends Interface {
     values: [BigNumberish, AddressLike]
   ): string;
   encodeFunctionData(
+    functionFragment: "registryAddress",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
     functionFragment: "renounceOwnership",
     values?: undefined
   ): string;
@@ -96,6 +103,10 @@ export interface PaymentSplitterInterface extends Interface {
   ): string;
   encodeFunctionData(
     functionFragment: "setPlatformWallet",
+    values: [AddressLike]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setRegistryAddress",
     values: [AddressLike]
   ): string;
   encodeFunctionData(
@@ -143,6 +154,10 @@ export interface PaymentSplitterInterface extends Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(
+    functionFragment: "registryAddress",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
     functionFragment: "renounceOwnership",
     data: BytesLike
   ): Result;
@@ -152,6 +167,10 @@ export interface PaymentSplitterInterface extends Interface {
   ): Result;
   decodeFunctionResult(
     functionFragment: "setPlatformWallet",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "setRegistryAddress",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -249,6 +268,19 @@ export namespace PublisherRegisteredEvent {
   export type LogDescription = TypedLogDescription<Event>;
 }
 
+export namespace RegistryAddressUpdatedEvent {
+  export type InputTuple = [oldRegistry: AddressLike, newRegistry: AddressLike];
+  export type OutputTuple = [oldRegistry: string, newRegistry: string];
+  export interface OutputObject {
+    oldRegistry: string;
+    newRegistry: string;
+  }
+  export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>;
+  export type Filter = TypedDeferredTopicFilter<Event>;
+  export type Log = TypedEventLog<Event>;
+  export type LogDescription = TypedLogDescription<Event>;
+}
+
 export interface PaymentSplitter extends BaseContract {
   connect(runner?: ContractRunner | null): PaymentSplitter;
   waitForDeployment(): Promise<this>;
@@ -326,6 +358,8 @@ export interface PaymentSplitter extends BaseContract {
     "nonpayable"
   >;
 
+  registryAddress: TypedContractMethod<[], [string], "view">;
+
   renounceOwnership: TypedContractMethod<[], [void], "nonpayable">;
 
   setPlatformFee: TypedContractMethod<
@@ -336,6 +370,12 @@ export interface PaymentSplitter extends BaseContract {
 
   setPlatformWallet: TypedContractMethod<
     [newWallet: AddressLike],
+    [void],
+    "nonpayable"
+  >;
+
+  setRegistryAddress: TypedContractMethod<
+    [newRegistry: AddressLike],
     [void],
     "nonpayable"
   >;
@@ -396,6 +436,9 @@ export interface PaymentSplitter extends BaseContract {
     "nonpayable"
   >;
   getFunction(
+    nameOrSignature: "registryAddress"
+  ): TypedContractMethod<[], [string], "view">;
+  getFunction(
     nameOrSignature: "renounceOwnership"
   ): TypedContractMethod<[], [void], "nonpayable">;
   getFunction(
@@ -404,6 +447,9 @@ export interface PaymentSplitter extends BaseContract {
   getFunction(
     nameOrSignature: "setPlatformWallet"
   ): TypedContractMethod<[newWallet: AddressLike], [void], "nonpayable">;
+  getFunction(
+    nameOrSignature: "setRegistryAddress"
+  ): TypedContractMethod<[newRegistry: AddressLike], [void], "nonpayable">;
   getFunction(
     nameOrSignature: "totalPayments"
   ): TypedContractMethod<[], [bigint], "view">;
@@ -451,6 +497,13 @@ export interface PaymentSplitter extends BaseContract {
     PublisherRegisteredEvent.InputTuple,
     PublisherRegisteredEvent.OutputTuple,
     PublisherRegisteredEvent.OutputObject
+  >;
+  getEvent(
+    key: "RegistryAddressUpdated"
+  ): TypedContractEvent<
+    RegistryAddressUpdatedEvent.InputTuple,
+    RegistryAddressUpdatedEvent.OutputTuple,
+    RegistryAddressUpdatedEvent.OutputObject
   >;
 
   filters: {
@@ -507,6 +560,17 @@ export interface PaymentSplitter extends BaseContract {
       PublisherRegisteredEvent.InputTuple,
       PublisherRegisteredEvent.OutputTuple,
       PublisherRegisteredEvent.OutputObject
+    >;
+
+    "RegistryAddressUpdated(address,address)": TypedContractEvent<
+      RegistryAddressUpdatedEvent.InputTuple,
+      RegistryAddressUpdatedEvent.OutputTuple,
+      RegistryAddressUpdatedEvent.OutputObject
+    >;
+    RegistryAddressUpdated: TypedContractEvent<
+      RegistryAddressUpdatedEvent.InputTuple,
+      RegistryAddressUpdatedEvent.OutputTuple,
+      RegistryAddressUpdatedEvent.OutputObject
     >;
   };
 }

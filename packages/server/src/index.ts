@@ -25,6 +25,7 @@ import publisherRouter from "./routes/publisher";
 import proxyRouter from "./routes/proxy";
 import dataRouter from "./routes/data";
 import { startLivenessChecker } from "./services/liveness";
+import { rateLimit, agentRateLimit } from "./middleware/rateLimit";
 
 const payTo = config.publisherAddress as `0x${string}`;
 
@@ -153,6 +154,17 @@ app.use("*", async (c, next) => {
     c.res.headers.set(k, v);
   }
 });
+
+// Rate limits — 60 req/min per IP. Each limiter keeps its own bucket so the
+// public data endpoints and the per-endpoint proxy don't starve each other.
+// Mount BEFORE the routes so 429s short-circuit all route logic.
+app.use("/api/data/*", rateLimit({ limit: 60, windowMs: 60_000, name: "data" }));
+app.use("/api/proxy/:endpointId", rateLimit({ limit: 60, windowMs: 60_000, name: "proxy" }));
+app.use("/api/proxy/:endpointId/*", rateLimit({ limit: 60, windowMs: 60_000, name: "proxy" }));
+// Per-agent layer (R2-G): 20 req/min per (endpointId, agent). Falls back to
+// IP when no agent address is discoverable from the request.
+app.use("/api/proxy/:endpointId", agentRateLimit({ limit: 20, windowMs: 60_000, name: "proxy-agent" }));
+app.use("/api/proxy/:endpointId/*", agentRateLimit({ limit: 20, windowMs: 60_000, name: "proxy-agent" }));
 
 // On-chain data routes — public, no payment required
 app.route("/api/data", dataRouter);

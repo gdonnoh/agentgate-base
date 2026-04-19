@@ -18,6 +18,11 @@ contract PaymentSplitter is Ownable {
     address public platformWallet;
     uint16 public platformFeeBps; // basis points: 500 = 5%
 
+    /// @notice Trusted PublisherRegistry allowed to call registerPublisher.
+    ///         Set by owner via setRegistryAddress after deployment.
+    ///         (R2-H: hardens against anyone claiming an unregistered endpoint.)
+    address public registryAddress;
+
     // endpointId → publisher wallet
     mapping(uint256 => address) public endpointPublisher;
 
@@ -37,6 +42,7 @@ contract PaymentSplitter is Ownable {
     event PublisherRegistered(uint256 indexed endpointId, address indexed publisher);
     event PlatformFeeUpdated(uint16 oldBps, uint16 newBps);
     event PlatformWalletUpdated(address oldWallet, address newWallet);
+    event RegistryAddressUpdated(address oldRegistry, address newRegistry);
 
     constructor(
         address _usdc,
@@ -52,20 +58,39 @@ contract PaymentSplitter is Ownable {
     }
 
     /**
-     * @notice Register the publisher wallet for an endpoint.
-     *         Can be called by the owner OR by the publisher themselves.
-     *         Once set, only the current publisher or owner can change it.
+     * @notice Register (or rotate) the publisher wallet for an endpoint.
+     *
+     *         R2-H: previously anyone could call this for an unregistered
+     *         endpoint (first-writer-wins), which meant an attacker could
+     *         front-run a legitimate publisher and claim future payments.
+     *         Now this is restricted to:
+     *           - the trusted PublisherRegistry (configured via setRegistryAddress)
+     *           - the current publisher (for self-rotation)
+     *           - the contract owner (emergency override)
+     *
+     *         Unregistered endpoints stay unregistered until the Registry
+     *         calls through during registerEndpoint().
      */
     function registerPublisher(uint256 endpointId, address publisher) external {
         require(publisher != address(0), "Invalid publisher");
         address current = endpointPublisher[endpointId];
-        // First registration: anyone can set. After that: only current publisher or owner.
         require(
-            current == address(0) || current == msg.sender || msg.sender == owner(),
-            "Not authorized to change publisher"
+            msg.sender == registryAddress ||
+            msg.sender == owner() ||
+            (current != address(0) && msg.sender == current),
+            "Only Registry or current publisher"
         );
         endpointPublisher[endpointId] = publisher;
         emit PublisherRegistered(endpointId, publisher);
+    }
+
+    /**
+     * @notice Set the trusted PublisherRegistry contract allowed to call
+     *         registerPublisher. Owner-only. Pass address(0) to unset.
+     */
+    function setRegistryAddress(address newRegistry) external onlyOwner {
+        emit RegistryAddressUpdated(registryAddress, newRegistry);
+        registryAddress = newRegistry;
     }
 
     /**

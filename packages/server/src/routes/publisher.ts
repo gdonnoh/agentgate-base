@@ -23,6 +23,7 @@ import {
   type PricingModel,
 } from "../services/proxyStore";
 import { getLivenessSummary, probeEndpointNow } from "../services/liveness";
+import { validateBackendUrl } from "../services/urlValidator";
 
 const BASE_SEPOLIA_RPC = process.env.RPC_URL || "https://sepolia.base.org";
 const REGISTRY    = (process.env.PUBLISHER_REGISTRY || "0xe5FC410c1E438D129949B9823C62CC153DD8C2F2") as `0x${string}`;
@@ -128,6 +129,21 @@ router.get("/endpoints/:address", (c) => {
  *
  * Body: { token: string, tunnelUrl: string }
  */
+// ── Tunnel nonce replay buffer (R2-E) ───────────────────────────────────────
+// Per-endpoint ring of recently-seen nonces to reject replays within the
+// token-rotation gap. Bounded at 100 entries so attackers can't blow up
+// memory by flooding distinct nonces.
+const TUNNEL_NONCES_MAX = 100;
+const recentTunnelNonces = new Map<number, string[]>();
+function rememberNonce(endpointId: number, nonce: string): boolean {
+  const list = recentTunnelNonces.get(endpointId) || [];
+  if (list.includes(nonce)) return false;
+  list.push(nonce);
+  while (list.length > TUNNEL_NONCES_MAX) list.shift();
+  recentTunnelNonces.set(endpointId, list);
+  return true;
+}
+
 router.post("/proxy-config/set-tunnel", async (c) => {
   let body: any;
   try { body = await c.req.json(); } catch {
@@ -142,9 +158,12 @@ router.post("/proxy-config/set-tunnel", async (c) => {
     return c.json({ error: "Missing tunnelUrl" }, 400);
   }
 
-  // Validate URL format
+  // Validate URL format + SSRF guard (reject private/loopback/metadata hosts)
   try { new URL(tunnelUrl); } catch {
     return c.json({ error: `Invalid tunnelUrl: "${tunnelUrl}"` }, 400);
+  }
+  try { validateBackendUrl(tunnelUrl); } catch (err: any) {
+    return c.json({ error: err.message }, 400);
   }
 
   // Look up the endpoint by tunnel token
@@ -153,16 +172,43 @@ router.post("/proxy-config/set-tunnel", async (c) => {
     return c.json({ error: "Invalid or expired tunnel token" }, 403);
   }
 
-  // Update the backendUrl. Keep everything else intact.
-  const updated = { ...config, backendUrl: tunnelUrl };
+  // ── Nonce replay protection (R2-E) ──
+  // Require callers to include an X-Tunnel-Nonce. We keep the last 100
+  // nonces per endpoint so the same body can't be replayed. Optional for
+  // backwards compatibility with very old CLI builds — if absent we skip
+  // the check but log a warning. After the CLI rollout this should become
+  // mandatory.
+  const nonce = c.req.header("x-tunnel-nonce") || c.req.header("X-Tunnel-Nonce");
+  if (nonce) {
+    if (!rememberNonce(config.endpointId, String(nonce))) {
+      console.warn(`[proxy-config] ⛔  Replayed tunnel nonce for endpoint #${config.endpointId}`);
+      return c.json({ error: "Tunnel nonce already used" }, 403);
+    }
+  } else {
+    console.warn(`[proxy-config] set-tunnel called without X-Tunnel-Nonce for endpoint #${config.endpointId}`);
+  }
+
+  // ── Rotate the tunnel token (R2-E) ──
+  // Generate a new token and persist it atomically with the backendUrl
+  // update. The CLI must store this value and use it on the next call;
+  // the old token is immediately invalid, so a stolen token can only be
+  // used once before being replaced.
+  const nextToken = `agt_${randomBytes(24).toString("base64url")}`;
+  const updated = {
+    ...config,
+    backendUrl: tunnelUrl,
+    tunnelToken: nextToken,
+    tunnelTokenUsedAt: Date.now(),
+  };
   proxyStore.set(updated);
 
-  console.log(`[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl} (via CLI token)`);
+  console.log(`[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl} (token rotated)`);
   return c.json({
     ok: true,
     endpointId: config.endpointId,
     proxyUrl: `/api/proxy/${config.endpointId}`,
     backendUrl: tunnelUrl,
+    nextToken,
   });
 });
 
@@ -189,9 +235,12 @@ router.post("/test-backend", async (c) => {
     return c.json({ error: "Missing backendUrl" }, 400);
   }
 
-  // Validate URL format
+  // Validate URL format + SSRF guard
   try { new URL(backendUrl); } catch {
     return c.json({ error: `Invalid URL: "${backendUrl}". Must start with https:// or http://` }, 400);
+  }
+  try { validateBackendUrl(backendUrl); } catch (err: any) {
+    return c.json({ error: err.message }, 400);
   }
 
   const t0 = Date.now();
@@ -261,6 +310,13 @@ router.post("/proxy-config", async (c) => {
   // backendUrl is optional — if empty, the publisher plans to connect via
   // CLI later (set-tunnel route). We still save the config + generate a
   // tunnel token so the CLI has something to authenticate with.
+  // When present, run it through the SSRF guard up-front so a bad URL is
+  // rejected BEFORE we do any on-chain lookups or network probes.
+  if (backendUrl) {
+    try { validateBackendUrl(backendUrl); } catch (err: any) {
+      return c.json({ error: err.message }, 400);
+    }
+  }
 
   // 1. Check timestamp freshness (within 10 minutes)
   if (Math.abs(Date.now() - Number(timestamp)) > 10 * 60 * 1000) {
@@ -283,7 +339,10 @@ router.post("/proxy-config", async (c) => {
     return c.json({ error: "Signature mismatch: recovered address does not match walletAddress" }, 403);
   }
 
-  // 3. Read endpoint from chain — verify walletAddress is the publisher
+  // 3. Read endpoint from chain — verify walletAddress is the publisher.
+  //    Also verify the backendUrl hostname matches the URL the publisher
+  //    committed on-chain. This prevents a compromised-server bypass where
+  //    the proxy_config points somewhere unrelated to what buyers saw.
   try {
     const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
     const ep = await client.readContract({
@@ -294,6 +353,26 @@ router.post("/proxy-config", async (c) => {
     const onChainPublisher = ep[1].toLowerCase();
     if (onChainPublisher !== walletAddress.toLowerCase()) {
       return c.json({ error: `Unauthorized: endpoint #${endpointId} is owned by ${ep[1]}, not ${walletAddress}` }, 403);
+    }
+
+    // Hostname match check. Only enforced when both sides are present —
+    // during the CLI-first flow (backendUrl=="") we haven't yet picked a
+    // host, and some older on-chain entries don't have a URL either.
+    const onChainUrl = ep[2];
+    if (backendUrl && onChainUrl) {
+      try {
+        const backendHost = new URL(backendUrl).hostname.toLowerCase();
+        const onChainHost = new URL(onChainUrl).hostname.toLowerCase();
+        if (backendHost !== onChainHost) {
+          return c.json({
+            error: `backendUrl hostname "${backendHost}" does not match the on-chain endpoint URL hostname "${onChainHost}". Update the on-chain registry entry first or use a matching host.`,
+          }, 400);
+        }
+      } catch {
+        // If either URL fails to parse, we already validated backendUrl above
+        // so it must be onChainUrl that's malformed — fall through without
+        // blocking the publisher on a bad legacy row.
+      }
     }
   } catch (err: any) {
     return c.json({ error: `Could not verify endpoint ownership on-chain: ${err.message}` }, 500);
