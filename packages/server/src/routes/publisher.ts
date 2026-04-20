@@ -75,6 +75,28 @@ const router = new Hono();
  * Throws { message, status } on mismatch so callers can forward it to the HTTP
  * response directly.
  */
+// Tunnel providers emit random hostnames the publisher cannot possibly
+// pre-register on-chain (e.g. cloudflared's `https://trained-foo.trycloudflare.com`).
+// When the backend URL is one of these the hostname/path match against the
+// on-chain URL is meaningless, so we skip it. Still protected by:
+//   - validateBackendUrl (SSRF blocklist runs before this helper)
+//   - the tunnel token auth (only the endpoint owner can call set-tunnel)
+//   - token rotation + nonce replay ring (R2-E)
+const TUNNEL_HOST_SUFFIXES = [
+  ".trycloudflare.com",
+  ".cfargotunnel.com",
+  ".ngrok-free.app",
+  ".ngrok.io",
+  ".ngrok.dev",
+  ".loca.lt",
+  ".serveo.net",
+];
+
+function isEphemeralTunnelHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return TUNNEL_HOST_SUFFIXES.some((s) => h.endsWith(s));
+}
+
 async function assertUrlMatchesOnChain(
   endpointId: number,
   backendUrl: string,
@@ -100,6 +122,14 @@ async function assertUrlMatchesOnChain(
     const err: any = new Error(`Invalid backendUrl: "${backendUrl}"`);
     err.status = 400;
     throw err;
+  }
+
+  // Cloudflared/ngrok/etc quick tunnels: hostnames are random per connection.
+  // The publisher couldn't have registered this URL on-chain, so we can't
+  // require a match — skip host AND path check. Other guards still apply.
+  if (isEphemeralTunnelHost(backendHost)) {
+    console.log(`[proxy-config] Accepting ephemeral tunnel host "${backendHost}" for endpoint #${endpointId} — skipping on-chain URL match`);
+    return;
   }
   try {
     const o = new URL(onChainUrl);
