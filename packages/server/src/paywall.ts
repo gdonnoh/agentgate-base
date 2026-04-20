@@ -377,62 +377,89 @@ export function paywallHtml(opts: PaywallOptions): string {
   </div>
 </div>
 
-<script type="module">
-  import { createWalletClient, createPublicClient, custom, http, parseUnits, getAddress } from "https://esm.sh/viem@2.47.6";
-  import { baseSepolia } from "https://esm.sh/viem@2.47.6/chains";
-
+<script>
+  // No external imports — we talk to the wallet via window.ethereum and
+  // encode USDC calls by hand. This avoids CORS/CDN flakiness and keeps
+  // the page working without a build step.
   const ENDPOINT_ID = ${opts.endpointId};
   const PROXY_URL = ${JSON.stringify(opts.proxyUrl)};
   const PAYTO = ${JSON.stringify(opts.payTo)};
   const USDC_AMOUNT = BigInt(${JSON.stringify(opts.usdcAmount)});
   const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-  const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+  const CHAIN_ID_HEX = "0x14a34"; // 84532 Base Sepolia
+
+  // ── Minimal ABI encoding helpers (no libs) ──
+  // All USDC interaction goes through two function selectors:
+  //   balanceOf(address)     → 0x70a08231
+  //   transfer(address,uint) → 0xa9059cbb
+  function padAddr(addr) { return addr.toLowerCase().replace(/^0x/, "").padStart(64, "0"); }
+  function padUint(n)    { return BigInt(n).toString(16).padStart(64, "0"); }
+  function encBalanceOf(addr) { return "0x70a08231" + padAddr(addr); }
+  function encTransfer(to, amount) { return "0xa9059cbb" + padAddr(to) + padUint(amount); }
 
   const connectBtn = document.getElementById("connectBtn");
   const payBtn = document.getElementById("payBtn");
   const status = document.getElementById("status");
 
-  function showStatus(msg, type = "info") {
+  function showStatus(msg, type) {
+    type = type || "info";
     status.innerHTML = (type === "info" ? '<span class="spinner"></span>' : "") + msg;
     status.className = "status show " + type;
   }
   function hideStatus() { status.className = "status"; }
 
-  let walletClient, publicClient, userAddress;
+  let userAddress = null;
 
-  connectBtn.onclick = async () => {
+  async function ensureBaseSepolia() {
+    const chainId = await window.ethereum.request({ method: "eth_chainId" });
+    if (chainId === CHAIN_ID_HEX) return;
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: CHAIN_ID_HEX }],
+      });
+    } catch (e) {
+      // 4902 = chain not known to the wallet yet → add it
+      if (e && e.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: CHAIN_ID_HEX,
+            chainName: "Base Sepolia",
+            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+            rpcUrls: ["https://sepolia.base.org"],
+            blockExplorerUrls: ["https://sepolia.basescan.org"],
+          }],
+        });
+      } else {
+        throw e;
+      }
+    }
+  }
+
+  connectBtn.onclick = async function () {
     if (!window.ethereum) {
       showStatus("No wallet detected. Install MetaMask or Rabby.", "error");
       return;
     }
     try {
       showStatus("Connecting...", "info");
-      walletClient = createWalletClient({ chain: baseSepolia, transport: custom(window.ethereum) });
-      publicClient = createPublicClient({ chain: baseSepolia, transport: http() });
-      const accounts = await walletClient.requestAddresses();
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       userAddress = accounts[0];
-
-      // Switch to Base Sepolia if needed
-      const chainId = await walletClient.getChainId();
-      if (chainId !== 84532) {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x14a34" }],
-        });
-      }
+      await ensureBaseSepolia();
 
       connectBtn.style.display = "none";
       payBtn.style.display = "block";
-      payBtn.textContent = \`Pay with \${userAddress.slice(0, 6)}…\${userAddress.slice(-4)}\`;
+      payBtn.textContent = "Pay with " + userAddress.slice(0, 6) + "…" + userAddress.slice(-4);
       hideStatus();
     } catch (e) {
-      showStatus("Connection failed: " + (e.shortMessage || e.message), "error");
+      showStatus("Connection failed: " + (e && (e.shortMessage || e.message) || String(e)), "error");
     }
   };
 
   const stepsEl = document.getElementById("steps");
   function setStep(n, state) {
-    const el = stepsEl.querySelector(\`[data-step="\${n}"]\`);
+    const el = stepsEl.querySelector('[data-step="' + n + '"]');
     if (!el) return;
     el.classList.remove("active", "done");
     if (state) el.classList.add(state);
@@ -440,19 +467,36 @@ export function paywallHtml(opts: PaywallOptions): string {
   function completeStep(n) { setStep(n, "done"); }
   function activateStep(n) { setStep(n, "active"); }
 
-  payBtn.onclick = async () => {
+  async function waitForReceipt(txHash, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 120000);
+    while (Date.now() < deadline) {
+      const receipt = await window.ethereum.request({
+        method: "eth_getTransactionReceipt",
+        params: [txHash],
+      });
+      if (receipt && receipt.blockNumber) return receipt;
+      await new Promise(function (r) { setTimeout(r, 2000); });
+    }
+    throw new Error("Transaction not confirmed within timeout");
+  }
+
+  payBtn.onclick = async function () {
     try {
       payBtn.disabled = true;
 
-      // Pre-check balance (silent)
-      const balance = await publicClient.readContract({
-        address: USDC_ADDRESS,
-        abi: [{ name: "balanceOf", type: "function", inputs: [{ type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" }],
-        functionName: "balanceOf",
-        args: [userAddress],
+      // Re-check chain (user may have switched away)
+      await ensureBaseSepolia();
+
+      // Pre-check USDC balance
+      const balHex = await window.ethereum.request({
+        method: "eth_call",
+        params: [{ to: USDC_ADDRESS, data: encBalanceOf(userAddress) }, "latest"],
       });
+      const balance = BigInt(balHex || "0x0");
       if (balance < USDC_AMOUNT) {
-        showStatus(\`Insufficient USDC. Need \${Number(USDC_AMOUNT) / 1e6}, have \${Number(balance) / 1e6}. <a href="https://faucet.circle.com/" target="_blank" style="color:inherit;text-decoration:underline">Get testnet USDC →</a>\`, "error");
+        const need = Number(USDC_AMOUNT) / 1e6;
+        const have = Number(balance) / 1e6;
+        showStatus("Insufficient USDC. Need " + need + ", have " + have + '. <a href="https://faucet.circle.com/" target="_blank" style="color:inherit;text-decoration:underline">Get testnet USDC →</a>', "error");
         payBtn.disabled = false;
         return;
       }
@@ -465,26 +509,27 @@ export function paywallHtml(opts: PaywallOptions): string {
 
       // Step 1: Sign USDC transfer
       activateStep(1);
-      const txHash = await walletClient.writeContract({
-        account: userAddress,
-        address: USDC_ADDRESS,
-        abi: [{ name: "transfer", type: "function", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" }],
-        functionName: "transfer",
-        args: [getAddress(PAYTO), USDC_AMOUNT],
+      const txHash = await window.ethereum.request({
+        method: "eth_sendTransaction",
+        params: [{
+          from: userAddress,
+          to: USDC_ADDRESS,
+          data: encTransfer(PAYTO, USDC_AMOUNT),
+        }],
       });
       completeStep(1);
 
       // Step 2: Broadcast
       activateStep(2);
       const txLink = document.getElementById("txLink");
-      txLink.href = \`https://sepolia.basescan.org/tx/\${txHash}\`;
-      txLink.textContent = \`\${txHash.slice(0, 10)}...\${txHash.slice(-8)} ↗\`;
-      await new Promise(r => setTimeout(r, 400));
+      txLink.href = "https://sepolia.basescan.org/tx/" + txHash;
+      txLink.textContent = txHash.slice(0, 10) + "..." + txHash.slice(-8) + " ↗";
+      await new Promise(function (r) { setTimeout(r, 400); });
       completeStep(2);
 
       // Step 3: Wait for confirmation
       activateStep(3);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+      await waitForReceipt(txHash);
       completeStep(3);
 
       // Step 4: Server verifies
@@ -507,26 +552,33 @@ export function paywallHtml(opts: PaywallOptions): string {
       }
       completeStep(4);
 
-      // Step 5: Redirect
+      // Step 5: Redirect / render result
       activateStep(5);
-      const data = await res2.json();
-      if (data.redirect) {
-        await new Promise(r => setTimeout(r, 600));
+      const ct = (res2.headers.get("content-type") || "").toLowerCase();
+      if (ct.indexOf("application/json") >= 0) {
+        const data = await res2.json();
+        await new Promise(function (r) { setTimeout(r, 600); });
         completeStep(5);
-        await new Promise(r => setTimeout(r, 500));
-        window.location.href = data.redirect;
+        if (data && data.redirect) {
+          await new Promise(function (r) { setTimeout(r, 400); });
+          window.location.href = data.redirect;
+        }
       } else {
+        // Upstream returned HTML / text — replace page with it.
+        const html = await res2.text();
         completeStep(5);
+        await new Promise(function (r) { setTimeout(r, 300); });
+        document.open();
+        document.write(html);
+        document.close();
       }
     } catch (e) {
-      showStatus((e.shortMessage || e.message || "Error"), "error");
+      showStatus((e && (e.shortMessage || e.message)) || String(e) || "Error", "error");
       payBtn.disabled = false;
       payBtn.style.display = "block";
       stepsEl.classList.remove("show");
     }
   };
-
-  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 </script>
 </body>
 </html>`;
