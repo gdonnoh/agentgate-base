@@ -655,6 +655,31 @@ export const proxyStore = {
     return Array.from(cache.values());
   },
 
+  /**
+   * One-shot cleanup of proxy configs left behind by a Registry redeploy.
+   * Any config whose endpointId >= `onChainCount` points at an ID the current
+   * Registry will never hand out, so it's a dead row: delete it from the
+   * in-memory cache and from Postgres. Returns the number of rows deleted.
+   *
+   * Intended to be called once at server startup after the cache has hydrated.
+   */
+  async purgeOrphansAboveCount(onChainCount: number): Promise<number> {
+    const toDelete: number[] = [];
+    for (const id of cache.keys()) {
+      if (id >= onChainCount) toDelete.push(id);
+    }
+    for (const id of toDelete) cache.delete(id);
+    if (usePostgres && pgPool) {
+      await pgPool.query(
+        "DELETE FROM proxy_configs WHERE endpoint_id >= $1",
+        [onChainCount],
+      );
+    } else if (toDelete.length > 0) {
+      saveToFile();
+    }
+    return toDelete.length;
+  },
+
   /** Find a config by its tunnel token. Returns undefined if not found or
    *  if the endpoint has no token assigned. O(N) scan — fine at small scale. */
   getByTunnelToken(token: string): ProxyConfig | undefined {

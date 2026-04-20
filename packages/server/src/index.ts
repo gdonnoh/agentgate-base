@@ -26,6 +26,8 @@ import proxyRouter from "./routes/proxy";
 import dataRouter from "./routes/data";
 import { startLivenessChecker } from "./services/liveness";
 import { rateLimit, agentRateLimit } from "./middleware/rateLimit";
+import { proxyStore } from "./services/proxyStore";
+import { createPublicClient, http as viemHttp, defineChain } from "viem";
 
 const payTo = config.publisherAddress as `0x${string}`;
 
@@ -250,6 +252,37 @@ serve(
     console.log(`💳 Payments to: ${payTo}\n`);
     // Start periodic liveness probes for registered endpoints.
     startLivenessChecker();
+
+    // One-shot cleanup of proxy configs left over from a previous Registry
+    // deploy. Any config whose id >= on-chain endpointCount is a dead row —
+    // the new Registry will never hand out that id, so we delete it. We wait
+    // 3s so proxyStore's async hydration has time to finish populating the
+    // in-memory cache before we scan it.
+    setTimeout(async () => {
+      try {
+        const REGISTRY_ADDR = (process.env.PUBLISHER_REGISTRY
+          || "0xD1Dc9293031DB577F8f39817C35deA9Fc8024456") as `0x${string}`;
+        const rpc = process.env.RPC_URL || "https://sepolia.base.org";
+        const chain = defineChain({
+          id: 84532, name: "Base Sepolia",
+          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+          rpcUrls: { default: { http: [rpc] } },
+        });
+        const client = createPublicClient({ chain, transport: viemHttp(rpc) });
+        const count = await client.readContract({
+          address: REGISTRY_ADDR,
+          abi: [{ name: "endpointCount", type: "function", inputs: [],
+                  outputs: [{ type: "uint256" }], stateMutability: "view" }],
+          functionName: "endpointCount",
+        }) as bigint;
+        const n = await proxyStore.purgeOrphansAboveCount(Number(count));
+        if (n > 0) {
+          console.log(`[proxyStore] 🧹 Purged ${n} orphan config(s) (id >= ${count}) from pre-redeploy state`);
+        }
+      } catch (e: any) {
+        console.warn("[proxyStore] orphan purge failed:", e.message);
+      }
+    }, 3000);
   }
 );
 }
