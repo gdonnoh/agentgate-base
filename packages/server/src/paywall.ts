@@ -480,6 +480,36 @@ export function paywallHtml(opts: PaywallOptions): string {
     throw new Error("Transaction not confirmed within timeout");
   }
 
+  // Server requires tx block depth >= 2 (anti-reorg guard). Poll the chain
+  // until latestBlock - txBlock >= 2 so the verify call succeeds first try.
+  async function waitForConfirmations(txBlockHex, minConfs, timeoutMs) {
+    const txBlock = BigInt(txBlockHex);
+    const needed = BigInt(minConfs || 2);
+    const deadline = Date.now() + (timeoutMs || 30000);
+    while (Date.now() < deadline) {
+      const latestHex = await window.ethereum.request({ method: "eth_blockNumber" });
+      const latest = BigInt(latestHex);
+      if (latest >= txBlock + needed) return;
+      await new Promise(function (r) { setTimeout(r, 1500); });
+    }
+  }
+
+  // Retry the server-side verify if it comes back with a "needs confirmations"
+  // error — Base Sepolia blocks can lag between the wallet RPC and the server's
+  // RPC by a second or two.
+  async function verifyWithServerRetry(headers) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const res = await fetch(PROXY_URL, { headers: headers });
+      if (res.status === 200) return res;
+      const bodyTxt = await res.clone().text();
+      const needsConfs = /confirmation/i.test(bodyTxt);
+      if (!needsConfs) return res; // permanent failure — let caller handle
+      await new Promise(function (r) { setTimeout(r, 2500); });
+    }
+    // Last attempt: return whatever we get so the caller surfaces the error
+    return await fetch(PROXY_URL, { headers: headers });
+  }
+
   payBtn.onclick = async function () {
     try {
       payBtn.disabled = true;
@@ -527,19 +557,18 @@ export function paywallHtml(opts: PaywallOptions): string {
       await new Promise(function (r) { setTimeout(r, 400); });
       completeStep(2);
 
-      // Step 3: Wait for confirmation
+      // Step 3: Wait for confirmation + 2 block depth (server enforces >= 2)
       activateStep(3);
-      await waitForReceipt(txHash);
+      const receipt = await waitForReceipt(txHash);
+      await waitForConfirmations(receipt.blockNumber, 2, 30000);
       completeStep(3);
 
-      // Step 4: Server verifies
+      // Step 4: Server verifies (with automatic retry on "needs confirmations")
       activateStep(4);
-      const res2 = await fetch(PROXY_URL, {
-        headers: {
-          "x-payment-tx": txHash,
-          "x-payment-from": userAddress,
-          "accept": "text/html",
-        },
+      const res2 = await verifyWithServerRetry({
+        "x-payment-tx": txHash,
+        "x-payment-from": userAddress,
+        "accept": "text/html",
       });
 
       if (res2.status !== 200) {
