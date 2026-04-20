@@ -98,16 +98,6 @@ function verifySessionToken(token: string): SessionTokenPayload | null {
   } catch { return null; }
 }
 
-// ── Per-call paywall bundle ──────────────────────────────────────────────────
-// A per-call endpoint prices "one forward = pricePerCall". But the browser
-// paywall issues a chat session (many forwards per payment), so charging just
-// `pricePerCall` up-front would let a buyer get N messages while the publisher
-// only gets paid for 1. We bundle: the paywall asks for `PER_CALL_PAYWALL_BUNDLE
-// × pricePerCall` up-front and grants PER_CALL_PAYWALL_BUNDLE session messages,
-// so publisher revenue per message matches what they configured. Per-token
-// endpoints don't need this — they already price by usage.
-const PER_CALL_PAYWALL_BUNDLE = 10;
-
 // ── Per-endpoint concurrency tracker ─────────────────────────────────────────
 // In-memory semaphore counting in-flight paid forwards per endpointId. When
 // the count reaches proxyConfig.maxConcurrent we reject new requests with 429
@@ -815,13 +805,7 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
 
       // Parse USDC Transfer event: Transfer(from, to, amount)
       const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-      // Browser paywall bundles per-call API endpoints so publisher revenue
-      // per forwarded message matches their configured pricePerCall.
-      const isApiMode_brw = proxyConfig.contentType !== "webpage";
-      const isPerCall_brw = proxyConfig.pricingModel !== "per-token";
-      const bundleMultiplier_brw = (isApiMode_brw && isPerCall_brw) ? PER_CALL_PAYWALL_BUNDLE : 1;
-      const paywallPriceUsd = priceUsd * bundleMultiplier_brw;
-      const requiredAmount = BigInt(usdToUsdcUnits(paywallPriceUsd));
+      const requiredAmount = BigInt(usdToUsdcUnits(priceUsd));
       const found = receipt.logs.find((log: any) => {
         if (log.address.toLowerCase() !== USDC_ADDRESS.toLowerCase()) return false;
         if (log.topics[0] !== TRANSFER_TOPIC) return false;
@@ -844,35 +828,31 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
       }
       await proxyStore.markTxHashUsed(browserTxHash);
 
-      const platformFee = paywallPriceUsd * (PLATFORM_FEE_PCT / 100);
-      const publisherNet = paywallPriceUsd - platformFee;
-      const bundleLog = bundleMultiplier_brw > 1 ? ` (${bundleMultiplier_brw}-msg bundle)` : "";
-      console.log(`[proxy] ✅ Browser payment verified for #${endpointId}: $${paywallPriceUsd}${bundleLog} via tx ${browserTxHash.slice(0, 12)}… ($${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform)`);
-      callTracker.record(endpointId, browserFrom, false, paywallPriceUsd, PLATFORM_FEE_PCT);
+      const platformFee = priceUsd * (PLATFORM_FEE_PCT / 100);
+      const publisherNet = priceUsd - platformFee;
+      console.log(`[proxy] ✅ Browser payment verified for #${endpointId}: $${priceUsd} via tx ${browserTxHash.slice(0, 12)}… ($${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform)`);
+      callTracker.record(endpointId, browserFrom, false, priceUsd, PLATFORM_FEE_PCT);
 
       // ── Chat-session issuance (root path only) ──
       // When the browser paid a root proxy URL we're not forwarding a specific
       // upstream request — the payment is to unlock the paywall. For API-mode
       // endpoints we issue a session token + render the in-browser chat UI.
-      // For webpage-mode endpoints (or when an explicit path was requested)
-      // we preserve the original "redirect to backend" / "forward through"
-      // behaviour so nothing else breaks.
-      const isApiMode = proxyConfig.contentType !== "webpage";
+      // Chat session is issued ONLY for per-token API endpoints — that's the
+      // pricing model that matches the open-ended conversational UX. Per-call
+      // API endpoints are stateless (weather, prices, one-shot lookups) and
+      // fall through to the redirect/forward path below, which gives the buyer
+      // the single upstream response they paid for. Webpage endpoints also
+      // fall through — payment = single unlock.
+      const isPerTokenApi = proxyConfig.contentType !== "webpage"
+        && proxyConfig.pricingModel === "per-token";
       const suffixRaw = c.req.path.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
       const isRootPath = suffixRaw === "" || suffixRaw === "/";
-      if (isApiMode && isRootPath) {
-        const isPerTokenSession = proxyConfig.pricingModel === "per-token";
-        // Per-token: budget = what they paid in micro-USDC (no bundle applied,
-        // the "bundle" here is already baked into priceUsd via token budget).
-        // Per-call: bundle = PER_CALL_PAYWALL_BUNDLE messages for the paid amount.
-        const paidMicroUsdc = BigInt(usdToUsdcUnits(paywallPriceUsd));
-        const budget = isPerTokenSession
-          ? { microUsdc: paidMicroUsdc }
-          : { messages: PER_CALL_PAYWALL_BUNDLE };
-
+      if (isPerTokenApi && isRootPath) {
+        const paidMicroUsdc = BigInt(usdToUsdcUnits(priceUsd));
         const sid = randomUUID();
         const session = await chatSessions.create(
-          sid, endpointId, browserTxHash, proxyConfig.pricingModel, budget
+          sid, endpointId, browserTxHash, proxyConfig.pricingModel,
+          { microUsdc: paidMicroUsdc },
         );
         const sessionToken = signSessionToken({
           sid,
@@ -886,9 +866,7 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
           sessionToken,
           expiresAt: session.expiresAt,
           pricingModel: proxyConfig.pricingModel,
-          budget: isPerTokenSession
-            ? { microUsdc: paidMicroUsdc.toString() }
-            : { messages: PER_CALL_PAYWALL_BUNDLE },
+          budget: { microUsdc: paidMicroUsdc.toString() },
           pricePerMillionTokens: proxyConfig.pricePerMillionTokens,
           models,
           endpointName: proxyConfig.name,
@@ -933,15 +911,6 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
     // Browser detection: if the request wants HTML, serve an interactive paywall page
     const accept = c.req.header("accept") || "";
     const isBrowser = c.req.method === "GET" && accept.includes("text/html");
-    // Bundle multiplier for the paywall display: per-call API endpoints get
-    // their price multiplied so the user pays upfront for a chat session of N
-    // messages (publisher revenue per msg matches their configured pricePerCall).
-    // Per-token endpoints and webpage endpoints are shown at their natural price.
-    const isApiMode_pw = proxyConfig.contentType !== "webpage";
-    const isPerCall_pw = proxyConfig.pricingModel !== "per-token";
-    const bundleMult_pw = (isApiMode_pw && isPerCall_pw) ? PER_CALL_PAYWALL_BUNDLE : 1;
-    const pwPriceUsd = priceUsd * bundleMult_pw;
-    const pwAmount = usdToUsdcUnits(pwPriceUsd);
     if (isBrowser) {
       // Build absolute URL forcing https behind proxies (Render/Cloudflare).
       // SECURITY: do NOT trust the Host header — use resolveResourceUrl()
@@ -965,8 +934,8 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
       const html = paywallHtml({
         endpointId,
         endpointName: displayName,
-        priceUsd: pwPriceUsd,
-        usdcAmount: pwAmount,
+        priceUsd,
+        usdcAmount: amount,
         payTo: PLATFORM_WALLET,
         backendUrl: proxyConfig.backendUrl,
         requireWorldId,
