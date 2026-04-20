@@ -132,31 +132,53 @@ const DEFAULT_ALLOWED_PATHS = [
   "/v1/",     // OpenAI-compatible: /v1/chat/completions, /v1/embeddings, etc.
 ];
 
+// Explicitly-blocked admin suffixes. These are the Ollama management paths
+// that would let a buyer pull/push/delete models or exfiltrate Modelfile
+// contents via /api/show. Anything on this list is rejected in both the
+// pre-payment gate and the post-payment forward step.
+const BLOCKED_ADMIN_SUFFIXES = [
+  "/api/show",
+  "/api/pull",
+  "/api/push",
+  "/api/delete",
+  "/api/create",
+  "/api/copy",
+  "/api/tags",
+  "/api/blobs",
+];
+
+function matchesAdminSuffix(suffix: string): boolean {
+  for (const bad of BLOCKED_ADMIN_SUFFIXES) {
+    if (suffix === bad || suffix.startsWith(bad + "/")) return true;
+  }
+  return false;
+}
+
 /** Return true if the suffix is allowed by the endpoint's whitelist.
- *  `suffix` is what we'd append to backendUrl (starts with "/" or is ""). */
+ *  `suffix` is what we'd append to backendUrl (starts with "/" or is "").
+ *
+ *  Empty/root suffix is ALWAYS allowed: a bare GET /api/proxy/:id hits the
+ *  backend root which is harmless (Ollama root just replies "Ollama is
+ *  running") and we need this to return the 402 challenge + browser paywall
+ *  page to probing clients. Admin suffixes from BLOCKED_ADMIN_SUFFIXES are
+ *  always rejected regardless of the allowlist. */
 function isAllowedProxySuffix(
   suffix: string,
-  backendUrl: string,
+  _backendUrl: string,
   allowedPaths: string[] = DEFAULT_ALLOWED_PATHS,
 ): boolean {
-  // Reject path traversal attempts outright.
+  // Reject path traversal outright.
   if (suffix.includes("..")) return false;
 
-  // Empty suffix is allowed ONLY when the backendUrl already has a full path
-  // (so it's pointing at a specific API endpoint, not the Ollama root).
-  if (suffix === "" || suffix === "/") {
-    try {
-      const u = new URL(backendUrl);
-      // Any non-trivial path on the backend implies "already targeted" — e.g.
-      // https://host/api/chat or https://host/v1/chat/completions.
-      return u.pathname !== "" && u.pathname !== "/";
-    } catch { return false; }
-  }
+  // Reject admin/management Ollama endpoints always.
+  if (matchesAdminSuffix(suffix)) return false;
 
-  // Must match one of the allowed prefixes exactly or as a subpath.
+  // Empty or root suffix — harmless, always allow.
+  if (suffix === "" || suffix === "/") return true;
+
+  // Non-empty suffix must match the allowlist.
   for (const allowed of allowedPaths) {
     if (allowed.endsWith("/")) {
-      // Prefix match (e.g. /v1/* covers any /v1/...)
       if (suffix === allowed.slice(0, -1) || suffix.startsWith(allowed)) return true;
     } else {
       if (suffix === allowed || suffix.startsWith(allowed + "/")) return true;
