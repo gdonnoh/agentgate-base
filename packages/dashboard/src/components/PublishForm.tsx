@@ -570,6 +570,16 @@ export function PublishForm() {
       {/* ── ADVANCED SETTINGS (collapsed by default) ─────────────────── */}
       {showAdvanced && (<>
 
+      {/* CLI auto-detect notice — the tunnel command pulls pricing / context /
+          concurrency / timeout straight from the local Ollama install, so
+          publishers don't have to hand-fill these unless they're NOT using
+          the CLI. Keeps the dashboard honest about what actually wins. */}
+      <div className="text-xs text-text-muted border border-border rounded-sm p-3 bg-bg/50">
+        💡 Using the CLI? All of these are auto-detected from your Ollama instance
+        when you run <code className="font-mono text-text-dim">npx agentgate-cli tunnel</code>.
+        You can skip this section.
+      </div>
+
       {/* ── Auth Headers (only for API mode) ── */}
       {contentType === "api" && (
         <div className="flex flex-col gap-2">

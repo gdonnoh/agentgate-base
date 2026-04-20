@@ -224,13 +224,104 @@ function rememberNonce(endpointId: number, nonce: string): boolean {
   return true;
 }
 
+/**
+ * Shape the CLI sends in the optional `detected` field. Typed loosely here
+ * because we never trust it wholesale — every field is validated + clamped
+ * below before it's merged into the stored config.
+ */
+interface DetectedBody {
+  contentType?: unknown;
+  pricingModel?: unknown;
+  allowedPaths?: unknown;
+  model?: unknown;
+  contextLength?: unknown;
+  maxInputTokens?: unknown;
+  maxOutputTokens?: unknown;
+  pricePerMillionTokens?: unknown;
+  maxConcurrent?: unknown;
+  paymentTimeoutSeconds?: unknown;
+}
+
+/**
+ * Normalize + validate the auto-detected config the CLI pushes. Returns null
+ * when the input is missing or entirely garbage so the caller can skip the
+ * merge. Each numeric field is clamped to the same range as the explicit
+ * publish form to avoid surprise "detected 50000 tokens" blowups.
+ *
+ * The CLI maps to this server's wire format: "perToken" (CLI) → "per-token"
+ * (server), "per-call" left alone. This is the ONLY place the conversion
+ * happens so the CLI stays convention-friendly.
+ */
+function normalizeDetected(raw: unknown): {
+  contentType: ContentType;
+  pricingModel: PricingModel;
+  allowedPaths?: string[];
+  model?: string;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  pricePerMillionTokens?: number;
+  maxConcurrent: number;
+  paymentTimeoutSeconds: number;
+} | null {
+  if (!raw || typeof raw !== "object") return null;
+  const d = raw as DetectedBody;
+
+  const contentType: ContentType = d.contentType === "webpage" ? "webpage" : "api";
+  const pricingModel: PricingModel =
+    d.pricingModel === "per-token" || d.pricingModel === "perToken" ? "per-token" : "per-call";
+
+  let allowedPaths: string[] | undefined;
+  if (Array.isArray(d.allowedPaths)) {
+    const cleaned = d.allowedPaths
+      .filter((p): p is string => typeof p === "string" && p.length > 0 && p.length < 256)
+      .slice(0, 32);
+    if (cleaned.length > 0) allowedPaths = cleaned;
+  }
+
+  const model =
+    typeof d.model === "string" && d.model.length > 0 && d.model.length < 256
+      ? d.model
+      : undefined;
+
+  const clampNum = (v: unknown, min: number, max: number): number | undefined => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return undefined;
+    return Math.min(max, Math.max(min, Math.floor(n)));
+  };
+
+  const maxInputTokens  = clampNum(d.maxInputTokens,  1, MAX_ALLOWED_INPUT_TOKENS);
+  const maxOutputTokens = clampNum(d.maxOutputTokens, 1, MAX_ALLOWED_OUTPUT_TOKENS);
+
+  const priceRaw = Number(d.pricePerMillionTokens);
+  const pricePerMillionTokens =
+    Number.isFinite(priceRaw) && priceRaw > 0 ? Math.min(10000, priceRaw) : undefined;
+
+  const maxConcurrent =
+    clampNum(d.maxConcurrent, MIN_MAX_CONCURRENT, MAX_MAX_CONCURRENT) ?? DEFAULT_MAX_CONCURRENT;
+  const paymentTimeoutSeconds =
+    clampNum(d.paymentTimeoutSeconds, MIN_PAYMENT_TIMEOUT_SECONDS, MAX_PAYMENT_TIMEOUT_SECONDS)
+    ?? DEFAULT_PAYMENT_TIMEOUT_SECONDS;
+
+  return {
+    contentType,
+    pricingModel,
+    allowedPaths,
+    model,
+    maxInputTokens,
+    maxOutputTokens,
+    pricePerMillionTokens,
+    maxConcurrent,
+    paymentTimeoutSeconds,
+  };
+}
+
 router.post("/proxy-config/set-tunnel", async (c) => {
   let body: any;
   try { body = await c.req.json(); } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
 
-  const { token, tunnelUrl } = body;
+  const { token, tunnelUrl, detected: detectedRaw } = body;
   if (!token || typeof token !== "string") {
     return c.json({ error: "Missing token" }, 400);
   }
@@ -287,21 +378,63 @@ router.post("/proxy-config/set-tunnel", async (c) => {
   // the old token is immediately invalid, so a stolen token can only be
   // used once before being replaced.
   const nextToken = `agt_${randomBytes(24).toString("base64url")}`;
-  const updated = {
+
+  // ── Auto-detected config (Option A) ──
+  // CLI push is authoritative — use dashboard overrides only if you never
+  // run the CLI again. We simply overwrite the detected fields on every
+  // connect. That keeps the mental model obvious ("whatever the CLI last
+  // saw is what's live") and avoids a per-field dirty-tracking matrix.
+  const normalizedDetected = normalizeDetected(detectedRaw);
+  const now = Date.now();
+
+  const updated: typeof config = {
     ...config,
     backendUrl: tunnelUrl,
     tunnelToken: nextToken,
-    tunnelTokenUsedAt: Date.now(),
+    tunnelTokenUsedAt: now,
   };
+
+  if (normalizedDetected) {
+    updated.contentType = normalizedDetected.contentType;
+    updated.pricingModel = normalizedDetected.pricingModel;
+    updated.maxConcurrent = normalizedDetected.maxConcurrent;
+    updated.paymentTimeoutSeconds = normalizedDetected.paymentTimeoutSeconds;
+    if (normalizedDetected.allowedPaths) updated.allowedPaths = normalizedDetected.allowedPaths;
+    // Per-token fields only make sense when pricingModel is "per-token";
+    // for "per-call" we leave them on the config untouched so switching
+    // back later doesn't lose the old values.
+    if (normalizedDetected.pricingModel === "per-token") {
+      if (normalizedDetected.pricePerMillionTokens !== undefined) {
+        updated.pricePerMillionTokens = normalizedDetected.pricePerMillionTokens;
+      }
+      if (normalizedDetected.maxInputTokens !== undefined) {
+        updated.maxInputTokens = normalizedDetected.maxInputTokens;
+      }
+      if (normalizedDetected.maxOutputTokens !== undefined) {
+        updated.maxOutputTokens = normalizedDetected.maxOutputTokens;
+      }
+    }
+    // Use the model name as the display name if the publisher never picked
+    // one — purely cosmetic, safe to default.
+    if (normalizedDetected.model && (!config.name || config.name.startsWith("Endpoint #"))) {
+      updated.name = normalizedDetected.model;
+    }
+    updated.detectedAt = now;
+  }
+
   proxyStore.set(updated);
 
-  console.log(`[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl} (token rotated)`);
+  console.log(
+    `[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl}` +
+    ` (token rotated${normalizedDetected ? `, auto-detected config applied` : ""})`
+  );
   return c.json({
     ok: true,
     endpointId: config.endpointId,
     proxyUrl: `/api/proxy/${config.endpointId}`,
     backendUrl: tunnelUrl,
     nextToken,
+    detected: normalizedDetected,
   });
 });
 

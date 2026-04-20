@@ -83,6 +83,104 @@ async function checkOllama(): Promise<string[]> {
   }
 }
 
+// ── Auto-detection (Option A) ───────────────────────────────────────────────
+// Publishers shouldn't have to fill in max_tokens / concurrency / pricing /
+// timeout on the dashboard when the local Ollama install already knows its
+// own context length. We GET /api/tags, POST /api/show on the first model,
+// extract the context window from model_info.<arch>.context_length, and
+// derive sensible caps + a pricing guess from the model name.
+
+export interface DetectedConfig {
+  contentType: "api";
+  pricingModel: "perToken";
+  allowedPaths: string[];
+  model: string;
+  contextLength: number;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  /** USD per 1,000,000 tokens — the server converts to whatever units it stores. */
+  pricePerMillionTokens: number;
+  maxConcurrent: number;
+  paymentTimeoutSeconds: number;
+}
+
+/**
+ * Pull the context window out of Ollama's /api/show response. Different
+ * architectures namespace the key under their own prefix (llama, mistral,
+ * qwen2, phi3, gemma2, ...), so we scan generically for any *.context_length
+ * key rather than hard-coding archs.
+ */
+function extractContextLength(modelInfo: Record<string, unknown> | undefined): number | null {
+  if (!modelInfo || typeof modelInfo !== "object") return null;
+  for (const [key, value] of Object.entries(modelInfo)) {
+    if (key.endsWith(".context_length") && typeof value === "number" && value > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Heuristic price guess based on model name. These are publish-time defaults —
+ * the publisher can still override them from the dashboard if they want.
+ */
+function guessPricePerMillionTokens(modelName: string): number {
+  const n = modelName.toLowerCase();
+  if (n.includes("70b") || n.includes("72b")) return 5.0;
+  if (n.includes("34b") || n.includes("33b")) return 2.0;
+  if (n.includes("13b")) return 1.0;
+  if (n.includes("8b")  || n.includes("7b"))  return 0.5;
+  if (n.includes("3b")  || n.includes("1b"))  return 0.2;
+  return 0.5;
+}
+
+async function detectOllamaConfig(): Promise<DetectedConfig | null> {
+  try {
+    const tagsRes = await fetch(`http://localhost:${OLLAMA_PORT}/api/tags`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!tagsRes.ok) return null;
+    const tagsData = (await tagsRes.json()) as any;
+    const models: any[] = Array.isArray(tagsData.models) ? tagsData.models : [];
+    if (models.length === 0) return null;
+
+    const firstModel = models[0]?.name;
+    if (!firstModel || typeof firstModel !== "string") return null;
+
+    const showRes = await fetch(`http://localhost:${OLLAMA_PORT}/api/show`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: firstModel }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!showRes.ok) return null;
+    const showData = (await showRes.json()) as any;
+
+    const contextLength = extractContextLength(showData?.model_info);
+    if (!contextLength) return null;
+
+    // Typical 60/40 split: reserve most of the window for prompt + context,
+    // leave ~40% for generation. Publishers can still override later.
+    const maxInputTokens  = Math.floor(contextLength * 0.6);
+    const maxOutputTokens = Math.floor(contextLength * 0.4);
+
+    return {
+      contentType: "api",
+      pricingModel: "perToken",
+      allowedPaths: ["/api/chat", "/api/generate", "/api/embeddings", "/v1/"],
+      model: firstModel,
+      contextLength,
+      maxInputTokens,
+      maxOutputTokens,
+      pricePerMillionTokens: guessPricePerMillionTokens(firstModel),
+      maxConcurrent: 1,
+      paymentTimeoutSeconds: 60,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function checkCloudflared(): boolean {
   try {
     execSync("which cloudflared", { stdio: "ignore" });
@@ -99,11 +197,16 @@ function extractTunnelUrl(output: string): string | null {
   return match ? match[0] : null;
 }
 
-async function setTunnelUrl(token: string, tunnelUrl: string): Promise<{
+async function setTunnelUrl(
+  token: string,
+  tunnelUrl: string,
+  detected: DetectedConfig | null,
+): Promise<{
   ok: boolean;
   endpointId?: number;
   proxyUrl?: string;
   nextToken?: string;
+  detected?: Partial<DetectedConfig>;
   error?: string;
 }> {
   try {
@@ -115,7 +218,10 @@ async function setTunnelUrl(token: string, tunnelUrl: string): Promise<{
         // and rejects replays, so a captured request body can't be resent.
         "x-tunnel-nonce": randomUUID(),
       },
-      body: JSON.stringify({ token, tunnelUrl }),
+      // CLI is authoritative: every connect pushes the freshly-detected
+      // config so the dashboard never needs to be re-edited. Older servers
+      // that don't know about `detected` just ignore the extra field.
+      body: JSON.stringify({ token, tunnelUrl, detected }),
       signal: AbortSignal.timeout(10000),
     });
     return (await res.json()) as any;
@@ -140,6 +246,22 @@ async function runTunnel(token: string) {
     );
   }
   log("✅", `Ollama running — ${models.length} model${models.length > 1 ? "s" : ""}: ${models.join(", ")}`);
+
+  // Step 1b: Auto-detect advanced settings from /api/show so the publisher
+  // never has to fill pricing/max_tokens/concurrency/timeout by hand.
+  // Failure here is non-fatal — we still register the tunnel, the dashboard
+  // defaults just stay in effect.
+  const detected = await detectOllamaConfig();
+  if (detected) {
+    console.log(`
+  🧠 Auto-detected settings:
+     Model: ${detected.model}
+     Context: ${detected.contextLength.toLocaleString()} tokens  → input cap ${detected.maxInputTokens.toLocaleString()}, output cap ${detected.maxOutputTokens.toLocaleString()}
+     Pricing: $${detected.pricePerMillionTokens.toFixed(2)} / 1M tokens
+`);
+  } else {
+    log("ℹ️ ", "Could not auto-detect Ollama model info — dashboard defaults will be used.");
+  }
 
   // Step 2: Check cloudflared
   log("🔍", "Checking cloudflared...");
@@ -207,7 +329,7 @@ async function runTunnel(token: string) {
 
   // Step 4: Register with AgentGate server
   log("🔗", `Registering tunnel with AgentGate server...`);
-  const result = await setTunnelUrl(token, tunnelUrl);
+  const result = await setTunnelUrl(token, tunnelUrl, detected);
 
   if (!result.ok) {
     cfProcess.kill("SIGTERM");

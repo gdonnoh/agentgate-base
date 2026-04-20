@@ -77,6 +77,14 @@ export interface ProxyConfig {
    * invalidated on next login.
    */
   tunnelTokenUsedAt?: number;
+  /**
+   * Last time the CLI pushed an auto-detected config via set-tunnel. Null /
+   * undefined means the fields currently on the config were set by the
+   * dashboard (publisher) rather than the CLI. The CLI push is authoritative
+   * for detected fields every time it runs — this marker is mostly for UI so
+   * the dashboard can show "Last auto-detected: Xm ago".
+   */
+  detectedAt?: number | null;
 }
 
 export const DEFAULT_MAX_CONCURRENT = 3;
@@ -298,6 +306,17 @@ async function initPostgres() {
       `ALTER TABLE proxy_configs
          ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER`
     );
+    // Option A: auto-detected config pushed by the CLI. allowed_paths is a
+    // JSONB array (per-endpoint proxy whitelist override); detected_at is a
+    // nullable timestamp marking the last CLI push so the UI can display it.
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS allowed_paths JSONB`
+    );
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS detected_at TIMESTAMPTZ`
+    );
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS proxy_calls (
         id            BIGSERIAL PRIMARY KEY,
@@ -365,6 +384,8 @@ async function initPostgres() {
         maxInputTokens:  row.max_input_tokens ?? undefined,
         maxOutputTokens: row.max_output_tokens ?? undefined,
         tunnelToken:     row.tunnel_token ?? undefined,
+        allowedPaths:    Array.isArray(row.allowed_paths) ? row.allowed_paths : undefined,
+        detectedAt:      row.detected_at ? new Date(row.detected_at).getTime() : null,
       };
       cache.set(config.endpointId, config);
     }
@@ -461,21 +482,25 @@ async function pgSet(config: ProxyConfig) {
        (endpoint_id, name, backend_url, inject_headers, publisher_addr,
         require_world_id, registered_at, max_concurrent, payment_timeout_seconds,
         content_type, pricing_model, price_per_million_tokens,
-        max_input_tokens, max_output_tokens, tunnel_token)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        max_input_tokens, max_output_tokens, tunnel_token,
+        allowed_paths, detected_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
        publisher_addr = $5, require_world_id = $6, registered_at = $7,
        max_concurrent = $8, payment_timeout_seconds = $9,
        content_type = $10, pricing_model = $11, price_per_million_tokens = $12,
        max_input_tokens = $13, max_output_tokens = $14,
-       tunnel_token = COALESCE($15, proxy_configs.tunnel_token)`,
+       tunnel_token = COALESCE($15, proxy_configs.tunnel_token),
+       allowed_paths = $16, detected_at = $17`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
      config.publisherAddr, config.requireWorldId, config.registeredAt,
      config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType,
      config.pricingModel, config.pricePerMillionTokens ?? null,
      config.maxInputTokens ?? null, config.maxOutputTokens ?? null,
-     config.tunnelToken ?? null]
+     config.tunnelToken ?? null,
+     config.allowedPaths ? JSON.stringify(config.allowedPaths) : null,
+     config.detectedAt ? new Date(config.detectedAt) : null]
   );
 }
 
@@ -537,6 +562,9 @@ function loadFromFile() {
           pricePerMillionTokens: raw.pricePerMillionTokens,
           maxInputTokens:  raw.maxInputTokens,
           maxOutputTokens: raw.maxOutputTokens,
+          tunnelToken:     raw.tunnelToken,
+          allowedPaths:    Array.isArray(raw.allowedPaths) ? raw.allowedPaths : undefined,
+          detectedAt:      raw.detectedAt ?? null,
         };
         cache.set(config.endpointId, config);
       }
