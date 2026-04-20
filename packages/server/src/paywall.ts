@@ -904,7 +904,8 @@ export function paywallHtml(opts: PaywallOptions): string {
       const typingEl = appendTyping();
 
       try {
-        const res = await fetch(PROXY_URL.replace(/\/$/, "") + "/api/chat", {
+        const base = PROXY_URL.endsWith("/") ? PROXY_URL.slice(0, -1) : PROXY_URL;
+        const res = await fetch(base + "/api/chat", {
           method: "POST",
           headers: {
             "content-type": "application/json",
