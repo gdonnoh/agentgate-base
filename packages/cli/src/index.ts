@@ -61,6 +61,33 @@ function writePersistedToken(token: string) {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// ANSI Shadow font — blue vertical gradient. Skip colors when not a TTY so
+// piping to a log file doesn't leave escape codes littered through it.
+const BANNER_ROWS = [
+  " █████╗  ██████╗ ███████╗███╗   ██╗████████╗ ██████╗  █████╗ ████████╗███████╗",
+  "██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝",
+  "███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ██║  ███╗███████║   ██║   █████╗  ",
+  "██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║   ██║██╔══██║   ██║   ██╔══╝  ",
+  "██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ╚██████╔╝██║  ██║   ██║   ███████╗",
+  "╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚══════╝",
+];
+const BANNER_GRADIENT = [51, 45, 39, 33, 27, 21]; // bright cyan → dark blue
+const TAGLINE = "One command to monetize your local AI — x402 on Base Sepolia";
+
+function printBanner() {
+  if (process.stdout.isTTY) {
+    console.log();
+    BANNER_ROWS.forEach((row, i) => {
+      const color = BANNER_GRADIENT[i] ?? 39;
+      console.log(`\x1b[38;5;${color}m\x1b[1m${row}\x1b[0m`);
+    });
+    // Dim tagline, centered under the banner
+    console.log(`\x1b[2m${" ".repeat(10)}${TAGLINE}\x1b[0m\n`);
+  } else {
+    console.log("\n  AgentGate CLI\n");
+  }
+}
+
 function log(icon: string, msg: string) {
   console.log(`  ${icon}  ${msg}`);
 }
@@ -242,7 +269,7 @@ async function setTunnelUrl(
 // ── Tunnel command ──────────────────────────────────────────────────────────
 
 async function runTunnel(token: string) {
-  console.log("\n  ◆ AgentGate CLI\n");
+  printBanner();
 
   // Step 1: Check Ollama
   log("🔍", "Checking Ollama...");
@@ -404,10 +431,8 @@ if (command === "tunnel") {
   }
 
   if (!token) {
-    console.log(`
-  ◆ AgentGate CLI
-
-  Usage:
+    printBanner();
+    console.log(`  Usage:
     AGENTGATE_TOKEN=<your-tunnel-token> agentgate tunnel
 
   The tunnel token is shown once when you publish an endpoint from
@@ -433,10 +458,8 @@ if (command === "tunnel") {
     fatal(err.message || String(err));
   });
 } else {
-  console.log(`
-  ◆ AgentGate CLI
-
-  Commands:
+  printBanner();
+  console.log(`  Commands:
     tunnel   Start a tunnel to your local Ollama and register it with AgentGate
 
   Example:
