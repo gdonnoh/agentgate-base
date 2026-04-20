@@ -19,6 +19,12 @@ services:
         sync: false
       - key: PRIVATE_KEY
         sync: false
+      # HMAC secret for chat-session tokens issued to the paywall after
+      # USDC payment. Set in the Render dashboard (owner-only). If unset
+      # the server derives a deterministic fallback from PRIVATE_KEY and
+      # warns at boot.
+      - key: SESSION_SECRET
+        sync: false
 
   # Frontend dashboard (static site)
   - type: web

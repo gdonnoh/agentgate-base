@@ -95,6 +95,9 @@ export interface DetectedConfig {
   pricingModel: "perToken";
   allowedPaths: string[];
   model: string;
+  /** Full list of model names from /api/tags — server merges into proxy config
+   *  so the paywall chat UI can render a model dropdown for the buyer. */
+  models: string[];
   contextLength: number;
   maxInputTokens: number;
   maxOutputTokens: number;
@@ -147,6 +150,11 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
     const firstModel = models[0]?.name;
     if (!firstModel || typeof firstModel !== "string") return null;
 
+    // Collect the full list so the paywall chat UI can show a dropdown.
+    const allModels: string[] = models
+      .map((m) => (typeof m?.name === "string" ? m.name : null))
+      .filter((n): n is string => !!n);
+
     const showRes = await fetch(`http://localhost:${OLLAMA_PORT}/api/show`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -169,6 +177,7 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
       pricingModel: "perToken",
       allowedPaths: ["/api/chat", "/api/generate", "/api/embeddings", "/v1/"],
       model: firstModel,
+      models: allModels,
       contextLength,
       maxInputTokens,
       maxOutputTokens,

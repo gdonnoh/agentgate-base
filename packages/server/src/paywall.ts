@@ -66,7 +66,9 @@ export function paywallHtml(opts: PaywallOptions): string {
     padding: 32px;
     width: 100%;
     max-width: 440px;
+    transition: max-width 0.3s ease;
   }
+  .card.chat-mode { max-width: 640px; }
   .brand {
     font-size: 12px;
     color: var(--text-muted);
@@ -306,6 +308,124 @@ export function paywallHtml(opts: PaywallOptions): string {
   }
   .step.done:not(:last-child)::after {
     background: var(--success);
+  }
+
+  /* ── Chat UI ─────────────────────────────────────────────── */
+  .chat-wrap { display: flex; flex-direction: column; gap: 14px; }
+  .chat-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .chat-counter {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .chat-counter.warn { color: #f59e0b; border-color: rgba(245, 158, 11, 0.35); }
+  .chat-counter-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--success);
+  }
+  .chat-counter.warn .chat-counter-dot { background: #f59e0b; }
+  .chat-model-select {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .chat-model-select:hover { border-color: var(--border-hover); }
+  .chat-messages {
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 420px;
+    overflow-y: auto;
+    padding: 6px 2px;
+  }
+  .bubble {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: 12px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .bubble.user {
+    align-self: flex-end;
+    background: var(--accent);
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.assistant {
+    align-self: flex-start;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-bottom-left-radius: 4px;
+  }
+  .bubble.typing {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .bubble.typing::before {
+    content: "";
+    display: inline-block;
+    width: 10px; height: 10px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  .chat-input-row {
+    display: flex; align-items: flex-end; gap: 8px;
+  }
+  .chat-input {
+    flex: 1;
+    min-height: 42px;
+    max-height: 140px;
+    padding: 10px 12px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    font-size: 13.5px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+  }
+  .chat-input:focus { border-color: var(--accent); }
+  .chat-input:disabled { opacity: 0.5; cursor: not-allowed; }
+  .chat-send {
+    width: auto;
+    padding: 0 18px;
+    height: 42px;
+    flex-shrink: 0;
+  }
+  .chat-empty {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 24px 8px;
+  }
+  .chat-exhausted {
+    text-align: center;
+    padding: 20px;
+    background: var(--surface-raised);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    border-radius: 8px;
+    color: var(--error);
+    font-size: 13px;
   }
 </style>
 </head>
@@ -588,6 +708,13 @@ export function paywallHtml(opts: PaywallOptions): string {
         const data = await res2.json();
         await new Promise(function (r) { setTimeout(r, 600); });
         completeStep(5);
+        // Chat-session issuance (API-mode endpoint) — swap the card to the
+        // in-browser chat UI instead of redirecting/rendering upstream HTML.
+        if (data && data.sessionToken) {
+          await new Promise(function (r) { setTimeout(r, 300); });
+          renderChatUI(data);
+          return;
+        }
         if (data && data.redirect) {
           await new Promise(function (r) { setTimeout(r, 400); });
           window.location.href = data.redirect;
@@ -608,6 +735,247 @@ export function paywallHtml(opts: PaywallOptions): string {
       stepsEl.classList.remove("show");
     }
   };
+
+  // ── Chat UI ────────────────────────────────────────────────────────────────
+  // After successful payment for an API-mode endpoint, the server returns a
+  // { sessionToken, pricingModel, budget, models[] } JSON payload instead of
+  // a redirect. We swap the card's content to a full chat interface that
+  // talks to /api/proxy/:id/api/chat via the session token.
+  //
+  // State kept in closure:
+  //   messagesState: [{role, content}]  — full convo, NOT persisted across refresh
+  //   remaining*   : live budget counter updated from x-session-remaining-* headers
+  //   selectedModel: dropdown value (defaults to first entry in models[])
+  //
+  // When the server returns 402 we swap the input area for an "Exhausted —
+  // Pay again" button that simply reloads the page so the user re-pays.
+  function renderChatUI(data) {
+    const card = document.querySelector(".card");
+    card.classList.add("chat-mode");
+
+    const endpointName = (data.endpointName || ("Endpoint #" + ENDPOINT_ID));
+    const models = Array.isArray(data.models) ? data.models.slice() : [];
+    const pricingModel = data.pricingModel || "per-call";
+    const pricePerMillion = Number(data.pricePerMillionTokens) || 0;
+
+    // Local state
+    const messagesState = [];
+    let selectedModel = models[0] || "";
+    let remainingMicroUsdc = data.budget && data.budget.microUsdc ? BigInt(data.budget.microUsdc) : null;
+    let remainingMessages  = data.budget && typeof data.budget.messages === "number" ? data.budget.messages : null;
+    let exhausted = false;
+    let pending = false;
+
+    function escapeHtmlClient(s) {
+      return String(s).replace(/[&<>"']/g, function (c) {
+        return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] || c;
+      });
+    }
+
+    function formatCounter() {
+      if (pricingModel === "per-token" && remainingMicroUsdc !== null) {
+        const usd = Number(remainingMicroUsdc) / 1_000_000;
+        let tokensLeft = "";
+        if (pricePerMillion > 0) {
+          const tokens = Math.floor((Number(remainingMicroUsdc) * 1) / pricePerMillion);
+          const k = tokens >= 1000 ? (tokens / 1000).toFixed(1) + "k" : String(tokens);
+          tokensLeft = " · " + k + " tokens";
+        }
+        return "$" + usd.toFixed(4) + " remaining" + tokensLeft;
+      }
+      if (remainingMessages !== null) {
+        return remainingMessages + " messages left";
+      }
+      return "";
+    }
+
+    function counterLow() {
+      if (pricingModel === "per-token" && remainingMicroUsdc !== null) {
+        return remainingMicroUsdc < 1000n; // < $0.001
+      }
+      if (remainingMessages !== null) return remainingMessages <= 2;
+      return false;
+    }
+
+    // Build the chat UI skeleton
+    card.innerHTML = [
+      '<div class="brand"><span class="brand-mark">\u25C6</span> AgentGate</div>',
+      '<div class="chat-wrap">',
+      '  <div class="chat-header">',
+      '    <h1 style="margin:0; font-size:20px;">' + escapeHtmlClient(endpointName) + '</h1>',
+      '    <span id="chatCounter" class="chat-counter">',
+      '      <span class="chat-counter-dot"></span>',
+      '      <span id="chatCounterText"></span>',
+      '    </span>',
+      '  </div>',
+      (models.length > 1
+        ? '  <select id="chatModel" class="chat-model-select">' +
+          models.map(function (m) { return '<option value="' + escapeHtmlClient(m) + '">' + escapeHtmlClient(m) + '</option>'; }).join("") +
+          '</select>'
+        : ''),
+      '  <div id="chatMessages" class="chat-messages">',
+      '    <div id="chatEmpty" class="chat-empty">Say hello to ' + escapeHtmlClient(selectedModel || "the model") + '.</div>',
+      '  </div>',
+      '  <div id="chatInputWrap">',
+      '    <div class="chat-input-row">',
+      '      <textarea id="chatInput" class="chat-input" rows="1" placeholder="Type a message... (\u2318+Enter to send)"></textarea>',
+      '      <button id="chatSend" class="chat-send">Send</button>',
+      '    </div>',
+      '  </div>',
+      '</div>',
+    ].join("");
+
+    const counterText = document.getElementById("chatCounterText");
+    const counterEl   = document.getElementById("chatCounter");
+    const messagesEl  = document.getElementById("chatMessages");
+    const emptyEl     = document.getElementById("chatEmpty");
+    const input       = document.getElementById("chatInput");
+    const sendBtn     = document.getElementById("chatSend");
+    const inputWrap   = document.getElementById("chatInputWrap");
+    const modelSelect = document.getElementById("chatModel");
+
+    function refreshCounter() {
+      counterText.textContent = formatCounter();
+      counterEl.classList.toggle("warn", counterLow());
+    }
+    refreshCounter();
+
+    if (modelSelect) {
+      modelSelect.addEventListener("change", function () {
+        selectedModel = modelSelect.value;
+      });
+    }
+
+    function appendBubble(role, content) {
+      if (emptyEl) emptyEl.remove();
+      const b = document.createElement("div");
+      b.className = "bubble " + role;
+      b.textContent = content;
+      messagesEl.appendChild(b);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return b;
+    }
+
+    function appendTyping() {
+      if (emptyEl) emptyEl.remove();
+      const b = document.createElement("div");
+      b.className = "bubble assistant typing";
+      b.textContent = "typing\u2026";
+      messagesEl.appendChild(b);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return b;
+    }
+
+    function setPending(p) {
+      pending = p;
+      input.disabled = p || exhausted;
+      sendBtn.disabled = p || exhausted;
+    }
+
+    function showExhausted(msg) {
+      exhausted = true;
+      setPending(false);
+      inputWrap.innerHTML = [
+        '<div class="chat-exhausted">' + escapeHtmlClient(msg || "Session exhausted.") + '</div>',
+        '<button id="payAgainBtn" style="margin-top:12px;">Pay again</button>',
+      ].join("");
+      document.getElementById("payAgainBtn").onclick = function () {
+        window.location.reload();
+      };
+    }
+
+    // Textarea auto-resize
+    input.addEventListener("input", function () {
+      input.style.height = "auto";
+      input.style.height = Math.min(140, input.scrollHeight) + "px";
+    });
+
+    async function sendMessage() {
+      if (pending || exhausted) return;
+      const text = (input.value || "").trim();
+      if (!text) return;
+
+      messagesState.push({ role: "user", content: text });
+      appendBubble("user", text);
+      input.value = "";
+      input.style.height = "auto";
+      setPending(true);
+
+      const typingEl = appendTyping();
+
+      try {
+        const res = await fetch(PROXY_URL.replace(/\/$/, "") + "/api/chat", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "accept": "application/json",
+            "x-agentgate-session": data.sessionToken,
+          },
+          body: JSON.stringify({
+            model: selectedModel,
+            messages: messagesState,
+            stream: false,
+          }),
+        });
+
+        // Update counter from response headers (works on success or 402).
+        const hMicro = res.headers.get("x-session-remaining-micro-usdc");
+        const hMsgs  = res.headers.get("x-session-remaining-messages");
+        if (hMicro !== null) { try { remainingMicroUsdc = BigInt(hMicro); } catch (_) {} }
+        if (hMsgs  !== null) { remainingMessages = Number(hMsgs); }
+        refreshCounter();
+
+        if (res.status === 402) {
+          typingEl.remove();
+          showExhausted("Session budget exhausted. Pay again to continue.");
+          return;
+        }
+
+        if (!res.ok) {
+          typingEl.remove();
+          const errTxt = await res.text();
+          appendBubble("assistant", "Error: " + errTxt.slice(0, 500));
+          setPending(false);
+          return;
+        }
+
+        const body = await res.json();
+        // Ollama /api/chat shape: { message: { role, content }, ... }
+        const content =
+          (body && body.message && typeof body.message.content === "string")
+            ? body.message.content
+            : (body && typeof body.response === "string")
+              ? body.response
+              : JSON.stringify(body);
+
+        typingEl.remove();
+        messagesState.push({ role: "assistant", content: content });
+        appendBubble("assistant", content);
+        refreshCounter();
+        setPending(false);
+
+        // Hit zero exactly? Lock the UI.
+        if ((remainingMessages !== null && remainingMessages <= 0) ||
+            (remainingMicroUsdc !== null && remainingMicroUsdc <= 0n)) {
+          showExhausted("Session fully spent. Pay again to continue.");
+        }
+      } catch (err) {
+        typingEl.remove();
+        appendBubble("assistant", "Network error: " + ((err && (err.message || err)) || ""));
+        setPending(false);
+      }
+    }
+
+    sendBtn.onclick = sendMessage;
+    input.addEventListener("keydown", function (e) {
+      // Cmd/Ctrl + Enter sends; plain Enter inserts newline.
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+    input.focus();
+  }
 </script>
 </body>
 </html>`;

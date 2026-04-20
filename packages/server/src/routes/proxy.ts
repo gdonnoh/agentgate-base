@@ -14,9 +14,12 @@ import { Hono } from "hono";
 import { createPublicClient, http } from "viem";
 import { defineChain } from "viem";
 import { HTTPFacilitatorClient } from "@x402/core/http";
+import { createHmac, createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
   proxyStore,
   callTracker,
+  chatSessions,
+  CHAT_SESSION_TTL_SECONDS,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
   DEFAULT_MAX_INPUT_TOKENS,
   DEFAULT_MAX_OUTPUT_TOKENS,
@@ -25,6 +28,75 @@ import {
 import { validateAgentKitHeader } from "../services/agentkit";
 import { config, USDC_ADDRESS } from "../config";
 import { paywallHtml } from "../paywall";
+
+// ── Session token signing (HMAC) ─────────────────────────────────────────────
+// Sessions issued after a browser pays are bearer tokens the chat UI sends
+// with every subsequent /api/chat call. We sign them with HMAC-SHA256 so the
+// server can verify them without a DB round-trip when the signature is bad.
+//
+// SESSION_SECRET precedence:
+//   1. process.env.SESSION_SECRET (recommended in production)
+//   2. deterministic derivation from PRIVATE_KEY — lets self-hosted deploys
+//      with no explicit secret still have a stable key across restarts.
+// We warn once at startup if the env var is missing so operators notice.
+const _envSessionSecret = process.env.SESSION_SECRET;
+let _sessionSecretWarned = false;
+function getSessionSecret(): string {
+  if (_envSessionSecret && _envSessionSecret.length > 0) return _envSessionSecret;
+  if (!_sessionSecretWarned) {
+    _sessionSecretWarned = true;
+    console.warn(
+      "[proxy] ⚠  SESSION_SECRET not set — deriving from PRIVATE_KEY. " +
+      "Set SESSION_SECRET explicitly in production for rotation safety."
+    );
+  }
+  return createHash("sha256")
+    .update("agentgate-session-" + (process.env.PRIVATE_KEY || ""))
+    .digest("hex");
+}
+
+function base64url(buf: Buffer): string {
+  return buf.toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+function base64urlDecode(s: string): Buffer {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64");
+}
+
+interface SessionTokenPayload {
+  sid: string;
+  endpointId: number;
+  expiresAt: number;
+}
+
+function signSessionToken(payload: SessionTokenPayload): string {
+  const body = base64url(Buffer.from(JSON.stringify(payload)));
+  const sig = createHmac("sha256", getSessionSecret()).update(body).digest("hex");
+  return `${body}.${sig}`;
+}
+
+function verifySessionToken(token: string): SessionTokenPayload | null {
+  if (typeof token !== "string" || token.length === 0) return null;
+  const dot = token.indexOf(".");
+  if (dot <= 0 || dot === token.length - 1) return null;
+  const body = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = createHmac("sha256", getSessionSecret()).update(body).digest("hex");
+  // Constant-time compare — both sides are hex, same length when valid.
+  const a = Buffer.from(sig, "hex");
+  const b = Buffer.from(expected, "hex");
+  if (a.length !== b.length) return null;
+  try {
+    if (!timingSafeEqual(a, b)) return null;
+  } catch { return null; }
+  try {
+    const payload = JSON.parse(base64urlDecode(body).toString("utf-8")) as SessionTokenPayload;
+    if (typeof payload.sid !== "string" || typeof payload.endpointId !== "number"
+        || typeof payload.expiresAt !== "number") return null;
+    if (payload.expiresAt <= Date.now()) return null;
+    return payload;
+  } catch { return null; }
+}
 
 // ── Per-endpoint concurrency tracker ─────────────────────────────────────────
 // In-memory semaphore counting in-flight paid forwards per endpointId. When
@@ -497,6 +569,15 @@ router.all("/:endpointId/*", async (c) => {
   }
 
   try {
+    // ── Session-authenticated chat path ──
+    // Browser paywall issues a session token after the user pays; subsequent
+    // /api/chat calls send it via `x-agentgate-session`. We ONLY accept the
+    // /api/chat path for sessioned calls — everything else falls through to
+    // the normal payment flow to minimise the session blast radius.
+    const sessionHeader = c.req.header("x-agentgate-session");
+    if (sessionHeader) {
+      return await handleSessionedRequest(c, endpointId, proxyConfig, sessionHeader);
+    }
     return await handleProxyRequest(c, endpointId, proxyConfig);
   } finally {
     releaseSlot(endpointId);
@@ -751,6 +832,50 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
       const publisherNet = priceUsd - platformFee;
       console.log(`[proxy] ✅ Browser payment verified for #${endpointId}: $${priceUsd} via tx ${browserTxHash.slice(0, 12)}… ($${publisherNet.toFixed(4)} publisher + $${platformFee.toFixed(4)} platform)`);
       callTracker.record(endpointId, browserFrom, false, priceUsd, PLATFORM_FEE_PCT);
+
+      // ── Chat-session issuance (root path only) ──
+      // When the browser paid a root proxy URL we're not forwarding a specific
+      // upstream request — the payment is to unlock the paywall. For API-mode
+      // endpoints we issue a session token + render the in-browser chat UI.
+      // For webpage-mode endpoints (or when an explicit path was requested)
+      // we preserve the original "redirect to backend" / "forward through"
+      // behaviour so nothing else breaks.
+      const isApiMode = proxyConfig.contentType !== "webpage";
+      const suffixRaw = c.req.path.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
+      const isRootPath = suffixRaw === "" || suffixRaw === "/";
+      if (isApiMode && isRootPath) {
+        const paidMicroUsdc = BigInt(usdToUsdcUnits(priceUsd));
+        const isPerTokenSession = proxyConfig.pricingModel === "per-token";
+        const budget = isPerTokenSession
+          ? { microUsdc: paidMicroUsdc }
+          // Per-call: hardcode 10 messages for MVP. Publisher-configurable later.
+          : { messages: 10 };
+
+        const sid = randomUUID();
+        const session = await chatSessions.create(
+          sid, endpointId, browserTxHash, proxyConfig.pricingModel, budget
+        );
+        const sessionToken = signSessionToken({
+          sid,
+          endpointId,
+          expiresAt: session.expiresAt,
+        });
+        const models = Array.isArray(proxyConfig.models) ? proxyConfig.models : [];
+
+        return c.json({
+          ok: true,
+          sessionToken,
+          expiresAt: session.expiresAt,
+          pricingModel: proxyConfig.pricingModel,
+          budget: isPerTokenSession
+            ? { microUsdc: paidMicroUsdc.toString() }
+            : { messages: 10 },
+          pricePerMillionTokens: proxyConfig.pricePerMillionTokens,
+          models,
+          endpointName: proxyConfig.name,
+          ttlSeconds: CHAT_SESSION_TTL_SECONDS,
+        });
+      }
 
       // Browser path: redirect directly to the original backend URL
       // (so CSS/JS/images load from the original origin, not the proxy)
@@ -1031,6 +1156,161 @@ async function handleProxyRequest(c: any, endpointId: number, proxyConfig: any):
 
   // 11. Now — and only now — deliver the buffered response to the buyer.
   return upstreamResponse;
+}
+
+/**
+ * Handle a request that came in with `x-agentgate-session`. The token was
+ * issued by the paywall after a successful USDC payment. We verify the HMAC,
+ * look the session up in the ledger, restrict the accepted path to /api/chat
+ * only, forward to Ollama with stream forced off, then atomically decrement
+ * the session budget based on actual token usage (per-token) or by 1 message
+ * (per-call).
+ *
+ * Returns the upstream response verbatim plus two response headers the chat
+ * UI uses to keep the counter live:
+ *   x-session-remaining-micro-usdc  (per-token)
+ *   x-session-remaining-messages    (per-call)
+ *   x-session-expires-at            (ms-epoch)
+ */
+async function handleSessionedRequest(
+  c: any,
+  endpointId: number,
+  proxyConfig: any,
+  sessionHeader: string,
+): Promise<Response> {
+  // 1. Signature + expiry check (no DB round-trip on bad tokens).
+  const payload = verifySessionToken(sessionHeader);
+  if (!payload) {
+    return c.json({ error: "Invalid session" }, 401);
+  }
+  if (payload.endpointId !== endpointId) {
+    return c.json({ error: "Session does not match endpoint" }, 401);
+  }
+
+  // 2. Ledger lookup. A valid HMAC with a missing row means the session
+  // was pruned / server data lost — treat as expired.
+  const session = await chatSessions.get(payload.sid);
+  if (!session) {
+    return c.json({ error: "Session expired" }, 401);
+  }
+
+  // 3. Path whitelist. Sessions are ONLY valid for /api/chat — this is a
+  //    DoS-minimisation measure: if a session token leaks we limit the
+  //    surface area to the single endpoint the chat UI needs.
+  const suffix = c.req.path.replace(new RegExp(`^/api/proxy/${endpointId}`), "");
+  if (suffix !== "/api/chat") {
+    return c.json({ error: "Session path not allowed" }, 403);
+  }
+  if (c.req.method !== "POST") {
+    return c.json({ error: "Only POST /api/chat is supported for sessioned calls" }, 405);
+  }
+
+  // 4. Read + sanitize the body. We also force stream=false server-side so
+  //    we can reliably parse the usage fields for per-token accounting.
+  let parsed: any = null;
+  try {
+    parsed = await c.req.json();
+  } catch {
+    return c.json({ error: "Invalid JSON body" }, 400);
+  }
+  const sanitized = sanitizeRequestBody(parsed) || {};
+  sanitized.stream = false;
+  const bodyBuffer = new TextEncoder().encode(JSON.stringify(sanitized));
+
+  // 5. Build upstream request.
+  const upstreamHeaders: Record<string, string> = { "content-type": "application/json" };
+  for (const [k, v] of Object.entries(proxyConfig.injectHeaders as Record<string, string>)) {
+    upstreamHeaders[k.toLowerCase()] = v;
+  }
+  const upstream = proxyConfig.backendUrl.replace(/\/$/, "") + "/api/chat";
+
+  let upstreamRes: Response;
+  try {
+    upstreamRes = await fetch(upstream, {
+      method: "POST",
+      headers: upstreamHeaders,
+      body: bodyBuffer,
+    });
+  } catch (err: any) {
+    return c.json({ error: `Upstream error: ${err?.message || String(err)}` }, 502);
+  }
+
+  // 6. Read upstream body (bounded by the same cap the paid path uses).
+  const bodyText = await upstreamRes.text();
+  if (bodyText.length > MAX_UPSTREAM_RESPONSE_BYTES) {
+    return c.json({ error: "Upstream response too large" }, 413);
+  }
+
+  // 7. Don't charge for upstream failures.
+  if (upstreamRes.status >= 400) {
+    return new Response(bodyText, {
+      status: upstreamRes.status,
+      headers: { "content-type": upstreamRes.headers.get("content-type") || "application/json" },
+    });
+  }
+
+  // 8. Decrement budget based on the session's pricing model. Atomic decrement
+  //    returns null if the buyer would overspend — return 402 with the current
+  //    remaining budget (pre-this-call) so the UI can render "exhausted".
+  let remainingMicroUsdc: bigint | undefined;
+  let remainingMessages: number | undefined;
+
+  if (session.pricingModel === "per-token") {
+    let costMicroUsd = 0n;
+    try {
+      const d = JSON.parse(bodyText);
+      const input  = Number(d?.prompt_eval_count) || 0;
+      const output = Number(d?.eval_count) || 0;
+      const rate = proxyConfig.pricePerMillionTokens ?? DEFAULT_PRICE_PER_MILLION_TOKENS;
+      // micro-USDC = tokens * (rate_usd_per_million * 1_000_000_micro_usdc_per_usdc) / 1_000_000_tokens
+      //            = tokens * rate
+      // i.e. per-million-tokens rate in USD converts 1:1 to per-million-tokens in micro-USD.
+      const microCost = Math.ceil((input + output) * rate);
+      costMicroUsd = BigInt(microCost);
+    } catch {
+      // Non-JSON upstream — we can't meter. Fail closed: charge 0 (best for buyer)
+      // and log so ops can notice. Session still counts down on expiry.
+      console.warn(`[proxy] sessioned #${endpointId}: non-JSON upstream, charged 0`);
+    }
+
+    if (costMicroUsd > 0n) {
+      const out = await chatSessions.decrement(payload.sid, { microUsdc: costMicroUsd });
+      if (!out) {
+        return c.json({
+          error: "Session budget exhausted",
+          remainingMicroUsdc: session.remainingMicroUsdc?.toString() ?? "0",
+          expiresAt: session.expiresAt,
+        }, 402);
+      }
+      remainingMicroUsdc = out.remainingMicroUsdc;
+    } else {
+      remainingMicroUsdc = session.remainingMicroUsdc ?? 0n;
+    }
+  } else {
+    const out = await chatSessions.decrement(payload.sid, { messages: 1 });
+    if (!out) {
+      return c.json({
+        error: "Session exhausted",
+        remainingMessages: session.remainingMessages ?? 0,
+        expiresAt: session.expiresAt,
+      }, 402);
+    }
+    remainingMessages = out.remainingMessages;
+  }
+
+  // 9. Build the response headers the chat UI watches.
+  const respHeaders: Record<string, string> = {
+    "content-type": upstreamRes.headers.get("content-type") || "application/json",
+    "x-session-expires-at": String(session.expiresAt),
+  };
+  if (remainingMicroUsdc !== undefined) {
+    respHeaders["x-session-remaining-micro-usdc"] = remainingMicroUsdc.toString();
+  }
+  if (remainingMessages !== undefined) {
+    respHeaders["x-session-remaining-messages"] = String(remainingMessages);
+  }
+
+  return new Response(bodyText, { status: upstreamRes.status, headers: respHeaders });
 }
 
 export default router;

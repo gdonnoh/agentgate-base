@@ -264,6 +264,9 @@ interface DetectedBody {
   pricingModel?: unknown;
   allowedPaths?: unknown;
   model?: unknown;
+  /** Full list of models scraped from /api/tags — CLI sends this so the paywall
+   *  chat UI can render a model selector dropdown. */
+  models?: unknown;
   contextLength?: unknown;
   maxInputTokens?: unknown;
   maxOutputTokens?: unknown;
@@ -287,6 +290,7 @@ function normalizeDetected(raw: unknown): {
   pricingModel: PricingModel;
   allowedPaths?: string[];
   model?: string;
+  models?: string[];
   maxInputTokens?: number;
   maxOutputTokens?: number;
   pricePerMillionTokens?: number;
@@ -313,6 +317,16 @@ function normalizeDetected(raw: unknown): {
       ? d.model
       : undefined;
 
+  // Full list of model names — cap at 64 entries / 256 chars each so a hostile
+  // CLI can't blow up the config row.
+  let models: string[] | undefined;
+  if (Array.isArray(d.models)) {
+    const cleaned = d.models
+      .filter((m): m is string => typeof m === "string" && m.length > 0 && m.length < 256)
+      .slice(0, 64);
+    if (cleaned.length > 0) models = cleaned;
+  }
+
   const clampNum = (v: unknown, min: number, max: number): number | undefined => {
     const n = Number(v);
     if (!Number.isFinite(n) || n <= 0) return undefined;
@@ -337,6 +351,7 @@ function normalizeDetected(raw: unknown): {
     pricingModel,
     allowedPaths,
     model,
+    models,
     maxInputTokens,
     maxOutputTokens,
     pricePerMillionTokens,
@@ -430,6 +445,7 @@ router.post("/proxy-config/set-tunnel", async (c) => {
     updated.maxConcurrent = normalizedDetected.maxConcurrent;
     updated.paymentTimeoutSeconds = normalizedDetected.paymentTimeoutSeconds;
     if (normalizedDetected.allowedPaths) updated.allowedPaths = normalizedDetected.allowedPaths;
+    if (normalizedDetected.models) updated.models = normalizedDetected.models;
     // Per-token fields only make sense when pricingModel is "per-token";
     // for "per-call" we leave them on the config untouched so switching
     // back later doesn't lose the old values.

@@ -71,6 +71,12 @@ export interface ProxyConfig {
    */
   allowedPaths?: string[];
   /**
+   * List of model names the CLI scraped from the publisher's Ollama /api/tags.
+   * Rendered as a dropdown in the browser chat UI so a buyer can pick which
+   * model to talk to. Empty / missing means we show no selector.
+   */
+  models?: string[];
+  /**
    * Last time a tunnel token was successfully used via set-tunnel. Updated
    * atomically with token rotation so replay attempts don't race. Serves as
    * a heartbeat marker too — an old stale token with no recent use gets
@@ -317,6 +323,34 @@ async function initPostgres() {
       `ALTER TABLE proxy_configs
          ADD COLUMN IF NOT EXISTS detected_at TIMESTAMPTZ`
     );
+    // List of model names the CLI pulled from /api/tags — rendered as the
+    // chat UI's model dropdown. JSONB because it's a simple array blob.
+    await pgPool.query(
+      `ALTER TABLE proxy_configs
+         ADD COLUMN IF NOT EXISTS models JSONB`
+    );
+    // Chat-session token ledger. One row per session issued by the paywall
+    // after a browser pays. The sid is the HMAC-signed primary key embedded
+    // in the session token. `remaining_*` columns are the session budget:
+    //   per-token  → remaining_micro_usdc counts down as tokens burn
+    //   per-call   → remaining_messages counts down by 1 per /api/chat call
+    // Atomic UPDATE ... WHERE remaining_* >= $amt RETURNING prevents a buyer
+    // from spending more than they paid for across concurrent requests.
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        sid                     TEXT PRIMARY KEY,
+        endpoint_id             BIGINT NOT NULL,
+        tx_hash                 TEXT,
+        pricing_model           TEXT NOT NULL,
+        remaining_micro_usdc    BIGINT,
+        remaining_messages      INTEGER,
+        expires_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await pgPool.query(
+      "CREATE INDEX IF NOT EXISTS idx_chat_sessions_expires ON chat_sessions(expires_at)"
+    );
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS proxy_calls (
         id            BIGSERIAL PRIMARY KEY,
@@ -385,6 +419,7 @@ async function initPostgres() {
         maxOutputTokens: row.max_output_tokens ?? undefined,
         tunnelToken:     row.tunnel_token ?? undefined,
         allowedPaths:    Array.isArray(row.allowed_paths) ? row.allowed_paths : undefined,
+        models:          Array.isArray(row.models) ? row.models : undefined,
         detectedAt:      row.detected_at ? new Date(row.detected_at).getTime() : null,
       };
       cache.set(config.endpointId, config);
@@ -483,8 +518,8 @@ async function pgSet(config: ProxyConfig) {
         require_world_id, registered_at, max_concurrent, payment_timeout_seconds,
         content_type, pricing_model, price_per_million_tokens,
         max_input_tokens, max_output_tokens, tunnel_token,
-        allowed_paths, detected_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        allowed_paths, detected_at, models)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      ON CONFLICT (endpoint_id) DO UPDATE SET
        name = $2, backend_url = $3, inject_headers = $4,
        publisher_addr = $5, require_world_id = $6, registered_at = $7,
@@ -492,7 +527,7 @@ async function pgSet(config: ProxyConfig) {
        content_type = $10, pricing_model = $11, price_per_million_tokens = $12,
        max_input_tokens = $13, max_output_tokens = $14,
        tunnel_token = COALESCE($15, proxy_configs.tunnel_token),
-       allowed_paths = $16, detected_at = $17`,
+       allowed_paths = $16, detected_at = $17, models = $18`,
     [config.endpointId, config.name, config.backendUrl, JSON.stringify(config.injectHeaders),
      config.publisherAddr, config.requireWorldId, config.registeredAt,
      config.maxConcurrent, config.paymentTimeoutSeconds, config.contentType,
@@ -500,7 +535,8 @@ async function pgSet(config: ProxyConfig) {
      config.maxInputTokens ?? null, config.maxOutputTokens ?? null,
      config.tunnelToken ?? null,
      config.allowedPaths ? JSON.stringify(config.allowedPaths) : null,
-     config.detectedAt ? new Date(config.detectedAt) : null]
+     config.detectedAt ? new Date(config.detectedAt) : null,
+     config.models ? JSON.stringify(config.models) : null]
   );
 }
 
@@ -564,6 +600,7 @@ function loadFromFile() {
           maxOutputTokens: raw.maxOutputTokens,
           tunnelToken:     raw.tunnelToken,
           allowedPaths:    Array.isArray(raw.allowedPaths) ? raw.allowedPaths : undefined,
+          models:          Array.isArray(raw.models) ? raw.models : undefined,
           detectedAt:      raw.detectedAt ?? null,
         };
         cache.set(config.endpointId, config);
@@ -724,3 +761,212 @@ export const hiddenEndpoints = {
     }
   },
 };
+
+// ── Chat session ledger ──────────────────────────────────────────────────────
+//
+// A chat session is the short-lived bearer-token identity the browser paywall
+// uses after a successful USDC payment. The token itself is HMAC-signed (see
+// proxy.ts) and carries the `sid` — this ledger is what actually tracks how
+// much budget is left. Atomic decrements guard against concurrent spend.
+//
+// When POSTGRES_URL is not set we fall back to an in-memory Map so local dev
+// still works. Sessions expire after 15 minutes regardless of budget.
+
+export interface ChatSession {
+  sid:                    string;
+  endpointId:             number;
+  txHash:                 string | null;
+  pricingModel:           PricingModel;
+  remainingMicroUsdc:     bigint | null;
+  remainingMessages:      number | null;
+  expiresAt:              number;
+  createdAt:              number;
+}
+
+export type ChatSessionBudget =
+  | { microUsdc: bigint }
+  | { messages: number };
+
+const CHAT_SESSION_TTL_MS = 15 * 60 * 1000;
+
+// In-memory session store for the non-Postgres path (and as a hot cache).
+const memSessions = new Map<string, ChatSession>();
+
+function pruneExpiredMemSessions() {
+  const now = Date.now();
+  for (const [sid, s] of memSessions) {
+    if (s.expiresAt <= now) memSessions.delete(sid);
+  }
+}
+const chatSessionCleanupTimer = setInterval(pruneExpiredMemSessions, 60_000);
+if (typeof chatSessionCleanupTimer.unref === "function") chatSessionCleanupTimer.unref();
+
+export const chatSessions = {
+  async create(
+    sid: string,
+    endpointId: number,
+    txHash: string | null,
+    pricingModel: PricingModel,
+    budget: ChatSessionBudget,
+  ): Promise<ChatSession> {
+    const now = Date.now();
+    const expiresAt = now + CHAT_SESSION_TTL_MS;
+    const session: ChatSession = {
+      sid,
+      endpointId,
+      txHash,
+      pricingModel,
+      remainingMicroUsdc: "microUsdc" in budget ? budget.microUsdc : null,
+      remainingMessages:  "messages"  in budget ? budget.messages  : null,
+      expiresAt,
+      createdAt: now,
+    };
+    memSessions.set(sid, session);
+    if (usePostgres && pgPool) {
+      try {
+        await pgPool.query(
+          `INSERT INTO chat_sessions
+             (sid, endpoint_id, tx_hash, pricing_model,
+              remaining_micro_usdc, remaining_messages,
+              expires_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7/1000.0), to_timestamp($8/1000.0))
+           ON CONFLICT (sid) DO NOTHING`,
+          [
+            sid, endpointId, txHash, pricingModel,
+            session.remainingMicroUsdc !== null ? session.remainingMicroUsdc.toString() : null,
+            session.remainingMessages,
+            expiresAt, now,
+          ]
+        );
+      } catch (e: any) {
+        console.warn("[chatSessions] pg create error:", e.message);
+      }
+    }
+    return session;
+  },
+
+  /**
+   * Look up a session. Returns null if missing or expired. Always checks
+   * Postgres when available — the in-memory map is only a hot cache and
+   * may be empty after a server restart while sessions are still active.
+   */
+  async get(sid: string): Promise<ChatSession | null> {
+    const now = Date.now();
+    const cached = memSessions.get(sid);
+    if (cached) {
+      if (cached.expiresAt <= now) {
+        memSessions.delete(sid);
+        return null;
+      }
+      return cached;
+    }
+    if (!usePostgres || !pgPool) return null;
+    try {
+      const { rows } = await pgPool.query(
+        `SELECT sid, endpoint_id, tx_hash, pricing_model,
+                remaining_micro_usdc, remaining_messages,
+                expires_at, created_at
+           FROM chat_sessions WHERE sid = $1 LIMIT 1`,
+        [sid]
+      );
+      if (rows.length === 0) return null;
+      const row = rows[0];
+      const expiresAtMs = new Date(row.expires_at).getTime();
+      if (expiresAtMs <= now) return null;
+      const session: ChatSession = {
+        sid: row.sid,
+        endpointId: Number(row.endpoint_id),
+        txHash: row.tx_hash ?? null,
+        pricingModel: row.pricing_model === "per-token" ? "per-token" : "per-call",
+        remainingMicroUsdc: row.remaining_micro_usdc !== null && row.remaining_micro_usdc !== undefined
+          ? BigInt(row.remaining_micro_usdc)
+          : null,
+        remainingMessages: row.remaining_messages !== null && row.remaining_messages !== undefined
+          ? Number(row.remaining_messages)
+          : null,
+        expiresAt: expiresAtMs,
+        createdAt: new Date(row.created_at).getTime(),
+      };
+      memSessions.set(sid, session);
+      return session;
+    } catch (e: any) {
+      console.warn("[chatSessions] pg get error:", e.message);
+      return null;
+    }
+  },
+
+  /**
+   * Atomically decrement the session budget. Returns the new remaining balance
+   * on success, or null when there isn't enough budget left (caller should
+   * return 402). Postgres `UPDATE ... WHERE remaining_* >= $amt RETURNING`
+   * prevents concurrent over-spend.
+   */
+  async decrement(
+    sid: string,
+    amount: { microUsdc?: bigint; messages?: number },
+  ): Promise<{ remainingMicroUsdc?: bigint; remainingMessages?: number } | null> {
+    // Postgres path — atomic guarded UPDATE.
+    if (usePostgres && pgPool) {
+      try {
+        if (amount.microUsdc !== undefined) {
+          const amt = amount.microUsdc;
+          const { rows } = await pgPool.query(
+            `UPDATE chat_sessions
+               SET remaining_micro_usdc = remaining_micro_usdc - $2::bigint
+             WHERE sid = $1
+               AND remaining_micro_usdc IS NOT NULL
+               AND remaining_micro_usdc >= $2::bigint
+               AND expires_at > NOW()
+             RETURNING remaining_micro_usdc, expires_at`,
+            [sid, amt.toString()]
+          );
+          if (rows.length === 0) return null;
+          const remaining = BigInt(rows[0].remaining_micro_usdc);
+          const cached = memSessions.get(sid);
+          if (cached) { cached.remainingMicroUsdc = remaining; memSessions.set(sid, cached); }
+          return { remainingMicroUsdc: remaining };
+        }
+        if (amount.messages !== undefined) {
+          const amt = amount.messages;
+          const { rows } = await pgPool.query(
+            `UPDATE chat_sessions
+               SET remaining_messages = remaining_messages - $2
+             WHERE sid = $1
+               AND remaining_messages IS NOT NULL
+               AND remaining_messages >= $2
+               AND expires_at > NOW()
+             RETURNING remaining_messages, expires_at`,
+            [sid, amt]
+          );
+          if (rows.length === 0) return null;
+          const remaining = Number(rows[0].remaining_messages);
+          const cached = memSessions.get(sid);
+          if (cached) { cached.remainingMessages = remaining; memSessions.set(sid, cached); }
+          return { remainingMessages: remaining };
+        }
+        return null;
+      } catch (e: any) {
+        console.warn("[chatSessions] pg decrement error:", e.message);
+        return null;
+      }
+    }
+
+    // In-memory fallback path — single-process, no real concurrency concerns.
+    const s = memSessions.get(sid);
+    if (!s) return null;
+    if (s.expiresAt <= Date.now()) { memSessions.delete(sid); return null; }
+    if (amount.microUsdc !== undefined) {
+      if (s.remainingMicroUsdc === null || s.remainingMicroUsdc < amount.microUsdc) return null;
+      s.remainingMicroUsdc = s.remainingMicroUsdc - amount.microUsdc;
+      return { remainingMicroUsdc: s.remainingMicroUsdc };
+    }
+    if (amount.messages !== undefined) {
+      if (s.remainingMessages === null || s.remainingMessages < amount.messages) return null;
+      s.remainingMessages = s.remainingMessages - amount.messages;
+      return { remainingMessages: s.remainingMessages };
+    }
+    return null;
+  },
+};
+
+export const CHAT_SESSION_TTL_SECONDS = CHAT_SESSION_TTL_MS / 1000;
