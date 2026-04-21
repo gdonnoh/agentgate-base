@@ -17,7 +17,7 @@ import {
   toBytes,
 } from "viem";
 import { baseSepolia } from "viem/chains";
-import { callTracker, proxyStore, hiddenEndpoints } from "../services/proxyStore";
+import { callTracker, proxyStore, hiddenEndpoints, hiddenByLiveness } from "../services/proxyStore";
 import { getLivenessSummary } from "../services/liveness";
 import { getInFlightCount } from "./proxy";
 
@@ -314,6 +314,10 @@ async function buildOverview() {
     // ones (owner needs to see them to un-hide).
     endpoints: endpoints
       .filter((ep: any) => !hiddenEndpoints.isHiddenAnywhere(ep.id))
+      // Drop endpoints whose liveness probe most recently failed. Buyers
+      // browsing the catalog shouldn't see offline publishers — they'll
+      // reappear on the next successful probe (~2 min).
+      .filter((ep: any) => !hiddenByLiveness.is(ep.id))
       .map(redactPrivateEndpointFields),
     timestamp: Date.now(),
   };

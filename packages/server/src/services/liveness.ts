@@ -11,7 +11,7 @@
  * after a server restart — one interval tick and we're back.
  */
 
-import { proxyStore } from "./proxyStore";
+import { proxyStore, hiddenByLiveness } from "./proxyStore";
 
 export interface LivenessCheck {
   checkedAt:  number;       // Date.now()
@@ -36,7 +36,10 @@ export interface LivenessSummary {
 }
 
 const RING_SIZE = 100;
-const LIVENESS_INTERVAL_MS = parseInt(process.env.LIVENESS_INTERVAL_MS || "900000", 10); // default 15 min
+// 2 min default — fast enough that a publisher who ctrl+c's the CLI
+// disappears from the public catalog within a couple of minutes, slow
+// enough that we're not hammering cloudflared tunnels.
+const LIVENESS_INTERVAL_MS = parseInt(process.env.LIVENESS_INTERVAL_MS || "120000", 10);
 const CHECK_TIMEOUT_MS = 8000;
 
 const history = new Map<number, LivenessCheck[]>();
@@ -49,7 +52,14 @@ function pushCheck(endpointId: number, check: LivenessCheck) {
 }
 
 async function probeEndpoint(endpointId: number, backendUrl: string): Promise<void> {
+  // Empty backendUrl = CLI-first flow where the publisher registered an
+  // endpoint but hasn't connected the tunnel yet. Don't probe, don't
+  // auto-hide — the endpoint stays in "unknown" state until the CLI sets
+  // a real URL.
+  if (!backendUrl) return;
+
   const t0 = Date.now();
+  let ok = false;
   try {
     const res = await fetch(backendUrl, {
       method: "HEAD",
@@ -58,7 +68,7 @@ async function probeEndpoint(endpointId: number, backendUrl: string): Promise<vo
     const latencyMs = Date.now() - t0;
     // 4xx is considered UP — auth/not-allowed means the server is responsive.
     // 5xx is DOWN. Network errors are DOWN.
-    const ok = res.status < 500;
+    ok = res.status < 500;
     pushCheck(endpointId, {
       checkedAt: Date.now(),
       statusCode: res.status,
@@ -77,6 +87,23 @@ async function probeEndpoint(endpointId: number, backendUrl: string): Promise<vo
       error: err?.message || String(err),
     });
     console.log(`[liveness] 🔴 #${endpointId} ERR ${err?.message || "unknown"} (${latencyMs}ms)`);
+  }
+
+  // Fail-first auto-hide: a single failed probe takes the endpoint out of
+  // the public catalog and makes /api/proxy/:id return 503 instead of a
+  // paywall. A single successful probe brings it back. We intentionally
+  // don't require N consecutive failures — publishers who Ctrl+C their CLI
+  // shouldn't stay advertised for 30 minutes.
+  if (ok) {
+    if (hiddenByLiveness.is(endpointId)) {
+      hiddenByLiveness.clear(endpointId);
+      console.log(`[liveness] 🔓 #${endpointId} back online — visible again`);
+    }
+  } else {
+    if (!hiddenByLiveness.is(endpointId)) {
+      hiddenByLiveness.mark(endpointId);
+      console.log(`[liveness] 🔒 #${endpointId} offline — auto-hidden from public catalog`);
+    }
   }
 }
 

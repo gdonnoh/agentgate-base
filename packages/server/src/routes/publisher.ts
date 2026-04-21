@@ -6,6 +6,7 @@ import {
   proxyStore,
   callTracker,
   hiddenEndpoints,
+  hiddenByLiveness,
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
   DEFAULT_CONTENT_TYPE,
@@ -469,6 +470,11 @@ router.post("/proxy-config/set-tunnel", async (c) => {
   }
 
   proxyStore.set(updated);
+  // Publisher reconnected — clear the "offline" flag immediately so the
+  // endpoint reappears in the public catalog without waiting for the next
+  // liveness tick (which is 2min away at worst). Next probe will confirm
+  // the new tunnel is actually reachable.
+  hiddenByLiveness.clear(config.endpointId);
 
   console.log(
     `[proxy-config] 🔗 Endpoint #${config.endpointId} tunnel updated → ${tunnelUrl}` +

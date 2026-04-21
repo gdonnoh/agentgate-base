@@ -19,6 +19,7 @@ import {
   proxyStore,
   callTracker,
   chatSessions,
+  hiddenByLiveness,
   CHAT_SESSION_TTL_SECONDS,
   DEFAULT_PAYMENT_TIMEOUT_SECONDS,
   DEFAULT_MAX_INPUT_TOKENS,
@@ -547,8 +548,35 @@ router.all("/:endpointId/*", async (c) => {
   //     reject early with a helpful message instead of a cryptic 502.
   if (!proxyConfig.backendUrl) {
     return c.json({
-      error: `Endpoint #${endpointId} is registered but not yet connected to a backend. The publisher needs to run: npx @agentgate/cli tunnel --token <token>`,
+      error: `Endpoint #${endpointId} is registered but not yet connected to a backend. The publisher needs to run: AGENTGATE_TOKEN=<token> npx agentgate-cli tunnel`,
       status: "pending_connection",
+    }, 503);
+  }
+
+  // 1b-bis. Liveness auto-hide: if the latest probe failed, the publisher's
+  // tunnel is dead right now. Don't serve a paywall or even a 402 — the
+  // pre-flight would just reject the payment anyway. Return 503 with a
+  // human-readable message + Retry-After so honest clients back off.
+  if (hiddenByLiveness.is(endpointId)) {
+    c.header("Retry-After", "120");
+    const accept = c.req.header("accept") || "";
+    if (c.req.method === "GET" && accept.includes("text/html")) {
+      const offlineHtml = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Offline — AgentGate</title>
+<style>body{background:#0a0a0a;color:#e5e7eb;font-family:'Inter',system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:24px}
+.card{background:#111;border:1px solid #1e1e1e;border-radius:12px;padding:32px;max-width:440px;text-align:center}
+h1{font-size:18px;margin:0 0 8px;color:#fbbf24}p{color:#9ca3af;font-size:13px;line-height:1.5;margin:8px 0}
+code{background:#161616;padding:2px 6px;border-radius:3px;color:#e5e7eb;font-size:11px}</style></head>
+<body><div class="card"><h1>⚠ Publisher currently offline</h1>
+<p>Endpoint #${endpointId} is registered but its tunnel isn't reachable right now.</p>
+<p>The publisher's CLI probably isn't running. Check back in a couple of minutes — the catalog refreshes as soon as they reconnect.</p>
+<p style="color:#6b7280;font-size:11px;margin-top:20px">You were not charged.</p>
+</div></body></html>`;
+      return c.body(offlineHtml, 503, { "Content-Type": "text/html; charset=utf-8" });
+    }
+    return c.json({
+      error: `Endpoint #${endpointId} is offline. Publisher's tunnel is not reachable — you were NOT charged. Retry in a couple of minutes.`,
+      status: "offline",
+      retryAfterSeconds: 120,
     }, 503);
   }
 

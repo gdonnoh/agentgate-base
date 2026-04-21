@@ -829,6 +829,21 @@ export const hiddenEndpoints = {
   },
 };
 
+// ── Auto-hide by liveness ────────────────────────────────────────────────────
+// When a liveness probe fails (or succeeds again) we flip a flag here. The
+// public /api/data/overview filters out marked endpoints so buyers don't
+// see dead tunnels in the catalog, and /api/proxy/:id returns 503 instead
+// of a paywall for them. Pure in-memory — on server restart we start clean
+// and the next probe tick re-populates.
+const livenessHiddenIds = new Set<number>();
+
+export const hiddenByLiveness = {
+  mark(endpointId: number) { livenessHiddenIds.add(endpointId); },
+  clear(endpointId: number) { livenessHiddenIds.delete(endpointId); },
+  is(endpointId: number): boolean { return livenessHiddenIds.has(endpointId); },
+  all(): number[] { return Array.from(livenessHiddenIds); },
+};
+
 // ── Chat session ledger ──────────────────────────────────────────────────────
 //
 // A chat session is the short-lived bearer-token identity the browser paywall
