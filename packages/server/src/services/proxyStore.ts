@@ -669,15 +669,57 @@ export const proxyStore = {
       if (id >= onChainCount) toDelete.push(id);
     }
     for (const id of toDelete) cache.delete(id);
+    // Also purge proxy_calls rows for orphan endpoint IDs — their stats are
+    // meaningless now that the endpoint doesn't exist on-chain.
+    for (const id of toDelete) endpointCalls.delete(id);
     if (usePostgres && pgPool) {
       await pgPool.query(
         "DELETE FROM proxy_configs WHERE endpoint_id >= $1",
+        [onChainCount],
+      );
+      await pgPool.query(
+        "DELETE FROM proxy_calls WHERE endpoint_id >= $1",
         [onChainCount],
       );
     } else if (toDelete.length > 0) {
       saveToFile();
     }
     return toDelete.length;
+  },
+
+  /**
+   * Purge proxy_calls rows that predate the current on-chain endpoint's
+   * registration. This catches the "endpoint id was reused after a redeploy
+   * or re-register" case: the old endpoint's calls were recorded against
+   * the same numerical id and survived the config purge, so the stats
+   * double-count (or worse — attribute old $3.40/call records to a new
+   * $0.005/call endpoint). Called per-endpoint on boot.
+   *
+   * Returns the number of call rows removed.
+   */
+  async purgeCallsBeforeRegistration(endpointId: number, registeredAtMs: number): Promise<number> {
+    let inMemoryRemoved = 0;
+    const calls = endpointCalls.get(endpointId);
+    if (calls && calls.length > 0) {
+      const kept = calls.filter(c => c.timestamp >= registeredAtMs);
+      inMemoryRemoved = calls.length - kept.length;
+      if (inMemoryRemoved > 0) {
+        if (kept.length > 0) endpointCalls.set(endpointId, kept);
+        else endpointCalls.delete(endpointId);
+      }
+    }
+    if (usePostgres && pgPool) {
+      try {
+        const { rowCount } = await pgPool.query(
+          "DELETE FROM proxy_calls WHERE endpoint_id = $1 AND recorded_at < to_timestamp($2 / 1000.0)",
+          [endpointId, registeredAtMs],
+        );
+        return Math.max(inMemoryRemoved, rowCount || 0);
+      } catch (e: any) {
+        console.warn("[proxyStore] purgeCallsBeforeRegistration pg error:", e.message);
+      }
+    }
+    return inMemoryRemoved;
   },
 
   /** Find a config by its tunnel token. Returns undefined if not found or

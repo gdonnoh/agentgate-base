@@ -269,15 +269,55 @@ serve(
           rpcUrls: { default: { http: [rpc] } },
         });
         const client = createPublicClient({ chain, transport: viemHttp(rpc) });
+        const REG_ABI = [
+          { name: "endpointCount", type: "function", inputs: [],
+            outputs: [{ type: "uint256" }], stateMutability: "view" },
+          { name: "endpoints", type: "function",
+            inputs: [{ name: "id", type: "uint256" }],
+            outputs: [
+              { name: "id",           type: "uint256" },
+              { name: "publisher",    type: "address" },
+              { name: "url",          type: "string"  },
+              { name: "pricePerCall", type: "uint256" },
+              { name: "paymaster",    type: "address" },
+              { name: "active",       type: "bool"    },
+              { name: "totalCalls",   type: "uint256" },
+              { name: "totalRevenue", type: "uint256" },
+              { name: "registeredAt", type: "uint256" },
+              { name: "requireWorldId", type: "bool" },
+            ],
+            stateMutability: "view" },
+        ] as const;
         const count = await client.readContract({
-          address: REGISTRY_ADDR,
-          abi: [{ name: "endpointCount", type: "function", inputs: [],
-                  outputs: [{ type: "uint256" }], stateMutability: "view" }],
-          functionName: "endpointCount",
+          address: REGISTRY_ADDR, abi: REG_ABI, functionName: "endpointCount",
         }) as bigint;
         const n = await proxyStore.purgeOrphansAboveCount(Number(count));
         if (n > 0) {
           console.log(`[proxyStore] 🧹 Purged ${n} orphan config(s) (id >= ${count}) from pre-redeploy state`);
+        }
+
+        // Per-endpoint: drop proxy_calls rows that predate the endpoint's
+        // on-chain registeredAt. Catches the "same endpoint id, different
+        // publisher" case where old stats shouldn't be credited to the
+        // current owner (seen in prod after a PaymentSplitter redeploy —
+        // endpoint #2 inherited $10.20 revenue from a pre-existing ghost).
+        let staleCallsTotal = 0;
+        for (let id = 0; id < Number(count); id++) {
+          try {
+            const ep = await client.readContract({
+              address: REGISTRY_ADDR, abi: REG_ABI,
+              functionName: "endpoints", args: [BigInt(id)],
+            }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
+            const registeredAtMs = Number(ep[8]) * 1000;
+            if (!registeredAtMs) continue;
+            const removed = await proxyStore.purgeCallsBeforeRegistration(id, registeredAtMs);
+            if (removed > 0) staleCallsTotal += removed;
+          } catch (e: any) {
+            console.warn(`[proxyStore] registeredAt read failed for endpoint #${id}:`, e.message);
+          }
+        }
+        if (staleCallsTotal > 0) {
+          console.log(`[proxyStore] 🧹 Purged ${staleCallsTotal} stale proxy_calls row(s) pre-dating endpoint registration`);
         }
       } catch (e: any) {
         console.warn("[proxyStore] orphan purge failed:", e.message);
