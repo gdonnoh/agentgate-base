@@ -199,6 +199,16 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
     const maxInputTokens  = Math.floor(contextLength * 0.6);
     const maxOutputTokens = Math.floor(contextLength * 0.4);
 
+    // Read the publisher's Ollama parallelism setting from the env. Ollama
+    // serialises inference by default (NUM_PARALLEL=1) — when the publisher
+    // opts into batch inference (`OLLAMA_NUM_PARALLEL=4 ollama serve`) the
+    // GPU shares KV-cache across slots and we can honestly promise that
+    // much concurrency to buyers. Cap at 8 to stay sane on consumer GPUs.
+    const ollamaParallel = Math.max(
+      1,
+      Math.min(8, parseInt(process.env.OLLAMA_NUM_PARALLEL || "1", 10) || 1),
+    );
+
     return {
       contentType: "api",
       pricingModel: "perToken",
@@ -209,7 +219,7 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
       maxInputTokens,
       maxOutputTokens,
       pricePerMillionTokens: guessPricePerMillionTokens(firstModel),
-      maxConcurrent: 1,
+      maxConcurrent: ollamaParallel,
       paymentTimeoutSeconds: 60,
     };
   } catch {
@@ -289,11 +299,15 @@ async function runTunnel(token: string) {
   // defaults just stay in effect.
   const detected = await detectOllamaConfig();
   if (detected) {
+    const parallelHint = detected.maxConcurrent === 1
+      ? "\n     💡 Tip: run \x1b[1mOLLAMA_NUM_PARALLEL=4 ollama serve\x1b[0m for true multi-user concurrency,\n        then restart this CLI so maxConcurrent updates on the endpoint."
+      : "";
     console.log(`
   🧠 Auto-detected settings:
-     Model: ${detected.model}
-     Context: ${detected.contextLength.toLocaleString()} tokens  → input cap ${detected.maxInputTokens.toLocaleString()}, output cap ${detected.maxOutputTokens.toLocaleString()}
-     Pricing: $${detected.pricePerMillionTokens.toFixed(2)} / 1M tokens
+     Model:       ${detected.model}
+     Context:     ${detected.contextLength.toLocaleString()} tokens  → input cap ${detected.maxInputTokens.toLocaleString()}, output cap ${detected.maxOutputTokens.toLocaleString()}
+     Pricing:     $${detected.pricePerMillionTokens.toFixed(2)} / 1M tokens
+     Concurrency: ${detected.maxConcurrent} parallel request${detected.maxConcurrent === 1 ? "" : "s"} (from OLLAMA_NUM_PARALLEL)${parallelHint}
 `);
   } else {
     log("ℹ️ ", "Could not auto-detect Ollama model info — dashboard defaults will be used.");
