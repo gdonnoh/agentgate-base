@@ -57,7 +57,7 @@ export function Guides({ onGoToPublish }: Props) {
         <div className="flex items-center gap-2">
           <span className="text-accent font-mono font-bold text-sm">$</span>
           <code className="text-sm text-accent font-mono">
-            npx agentgate-cli tunnel --token {"<"}your-token{">"}
+            AGENTGATE_TOKEN={"<"}your-token{">"} npx agentgate-cli tunnel
           </code>
         </div>
         <p className="text-xs text-text-muted font-sans leading-relaxed">
@@ -138,7 +138,7 @@ export function Guides({ onGoToPublish }: Props) {
             <p className="text-xs text-text-muted font-sans">
               Paste your token and run:
             </p>
-            <CodeBlock>npx agentgate-cli tunnel --token agt_xxxxx</CodeBlock>
+            <CodeBlock>AGENTGATE_TOKEN=agt_xxxxx npx agentgate-cli tunnel</CodeBlock>
             <p className="text-xs text-text-muted font-sans">
               The CLI handles everything: detects Ollama, starts a tunnel with the right
               flags, registers the URL with AgentGate. Your endpoint goes live in ~10 seconds.

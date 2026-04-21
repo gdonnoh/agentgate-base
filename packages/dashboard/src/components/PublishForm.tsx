@@ -464,7 +464,7 @@ export function PublishForm() {
           <span className="text-text-muted"> — publish an endpoint below, then run:</span>
         </p>
         <code className="text-xs text-accent font-mono bg-bg border border-border rounded-sm px-3 py-2 block">
-          npx agentgate-cli tunnel --token {"<"}your-token{">"}
+          AGENTGATE_TOKEN={"<"}your-token{">"} npx agentgate-cli tunnel
         </code>
         <p className="text-xs text-text-muted font-sans">
           Starts a tunnel from your machine to AgentGate. Buyers pay USDC, you earn per call. No wallet or private key needed in the terminal.
@@ -1133,12 +1133,12 @@ export function PublishForm() {
                 </p>
                 <div className="relative">
                   <code className="text-[11px] text-accent font-mono break-all bg-surface p-2 rounded-sm block pr-16">
-                    npx agentgate-cli tunnel --token {tunnelToken}
+                    AGENTGATE_TOKEN={tunnelToken} npx agentgate-cli tunnel
                   </code>
                   <button
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(`npx agentgate-cli tunnel --token ${tunnelToken}`);
+                        await navigator.clipboard.writeText(`AGENTGATE_TOKEN=${tunnelToken} npx agentgate-cli tunnel`);
                       } catch {}
                     }}
                     className="absolute top-1.5 right-1.5 text-[10px] font-mono text-text-muted hover:text-accent transition-colors px-2 py-0.5 border border-border rounded-sm"
