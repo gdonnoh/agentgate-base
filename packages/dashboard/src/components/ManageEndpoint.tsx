@@ -73,6 +73,8 @@ export function ManageEndpoint() {
   const [hidingId, setHidingId] = useState<number | null>(null);
   const [hideError, setHideError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [reconnectingId, setReconnectingId] = useState<number | null>(null);
+  const [reconnectToken, setReconnectToken] = useState<{ id: number; token: string } | null>(null);
 
   const netData = NETWORKS[NET];
   const paymasterAddr = DEPLOYMENTS[NET].paymaster;
@@ -140,9 +142,9 @@ export function ManageEndpoint() {
       `DELETE endpoint #${ep.id}?\n\n` +
       `This stops the proxy from serving ANY calls — including buyers who ` +
       `already have the URL. They will start getting 404 errors.\n\n` +
-      `The on-chain registry entry will still exist (no gas spent). ` +
-      `To bring the endpoint back, re-publish it from the Publish tab.\n\n` +
-      `This action cannot be undone.`
+      `The on-chain registry entry stays yours forever (you already paid for it). ` +
+      `To bring the endpoint back later, click "Get CLI token" — it's free, ` +
+      `no 1 USDC fee. That's your recovery path.`
     );
     if (!ok) return;
     setDeletingId(ep.id);
@@ -170,6 +172,43 @@ export function ManageEndpoint() {
       setHideError(e?.shortMessage || e?.message || String(e));
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  // ── Reconnect: wallet-sign a fresh CLI tunnel token ───────────────────────
+  // Publisher already paid the 1 USDC fee when they originally registered the
+  // endpoint on-chain. Losing the CLI token / clicking Delete / switching
+  // machines should never cost them another USDC. This flow proves on-chain
+  // ownership via signature and the server hands back a brand-new tunnel
+  // token — no fee, no gas.
+  async function reconnectEndpoint(ep: MyEndpoint) {
+    if (!wallet.state.address) return;
+    setReconnectingId(ep.id);
+    setHideError(null);
+    try {
+      const timestamp = Date.now();
+      const message = `AgentGate reconnect endpoint\nendpointId: ${ep.id}\ntimestamp: ${timestamp}`;
+      const signature = await (window as any).ethereum.request({
+        method: "personal_sign",
+        params: [message, wallet.state.address],
+      });
+      const res = await fetch(`${SERVER_URL}/api/publisher/proxy-config/${ep.id}/reconnect`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: wallet.state.address,
+          signature,
+          timestamp,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      setReconnectToken({ id: ep.id, token: data.tunnelToken });
+      await fetchMyEndpoints(wallet.state.address);
+    } catch (e: any) {
+      setHideError(e?.shortMessage || e?.message || String(e));
+    } finally {
+      setReconnectingId(null);
     }
   }
 
@@ -321,6 +360,39 @@ export function ManageEndpoint() {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* Fresh CLI token modal — shown after a successful Reconnect.
+          One-time display: the token only exists in this response, we never
+          store it plaintext for re-display. Publisher copies and pastes. */}
+      {reconnectToken && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" onClick={() => setReconnectToken(null)}>
+          <div className="bg-surface border border-accent/30 rounded-lg p-6 max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-accent mb-2">Fresh CLI token for Endpoint #{reconnectToken.id}</h3>
+            <p className="text-xs text-text-muted mb-4">
+              Copy this now — it's shown once. No fee charged, your original 1 USDC publishing fee covers this endpoint forever.
+            </p>
+            <code className="text-[11px] text-accent font-mono break-all bg-bg p-2 rounded-sm block border border-border mb-2">
+              AGENTGATE_TOKEN={reconnectToken.token} npx agentgate-cli tunnel
+            </code>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={async () => {
+                  try { await navigator.clipboard.writeText(`AGENTGATE_TOKEN=${reconnectToken.token} npx agentgate-cli tunnel`); } catch {}
+                }}
+                className="text-xs font-mono px-3 py-1.5 rounded-sm border border-border bg-transparent text-text-muted hover:text-accent hover:border-accent/30 transition-all"
+              >
+                Copy command
+              </button>
+              <button
+                onClick={() => setReconnectToken(null)}
+                className="text-xs font-mono px-3 py-1.5 rounded-sm border border-accent/30 bg-accent-dim text-accent transition-all"
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -437,9 +509,17 @@ export function ManageEndpoint() {
                     {hidingId === ep.id ? "..." : ep.hidden ? "Unhide" : "Hide"}
                   </button>
                   <button
+                    onClick={() => reconnectEndpoint(ep)}
+                    disabled={reconnectingId === ep.id || deletingId === ep.id || hidingId === ep.id}
+                    title="Issue a fresh CLI tunnel token for this endpoint. Wallet-signed, no fee — use this to recover if you lost the token or clicked Delete."
+                    className="shrink-0 text-xs font-mono px-2 py-1 rounded-sm border bg-transparent text-text-muted border-border hover:text-accent hover:border-accent/30 transition-all duration-150 disabled:opacity-50"
+                  >
+                    {reconnectingId === ep.id ? "..." : "Get CLI token"}
+                  </button>
+                  <button
                     onClick={() => deleteEndpoint(ep)}
-                    disabled={deletingId === ep.id || hidingId === ep.id}
-                    title="DELETE: removes the proxy config — /api/proxy/:id will return 404 for everyone. On-chain entry remains. Re-publish to restore."
+                    disabled={deletingId === ep.id || hidingId === ep.id || reconnectingId === ep.id}
+                    title="DELETE: removes the proxy config — /api/proxy/:id will return 404 for everyone. On-chain entry remains. Click 'Get CLI token' later to restore without paying again."
                     className="shrink-0 text-xs font-mono px-2 py-1 rounded-sm border bg-transparent text-text-muted border-border hover:text-error hover:border-error/30 transition-all duration-150 disabled:opacity-50"
                   >
                     {deletingId === ep.id ? "..." : "Delete"}

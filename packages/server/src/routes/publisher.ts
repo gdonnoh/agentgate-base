@@ -764,6 +764,110 @@ router.post("/proxy-config", async (c) => {
  * Body: { walletAddress, signature, timestamp }
  * Message signed: `AgentGate deactivate proxy\nendpointId: <id>\ntimestamp: <ts>`
  */
+/**
+ * POST /api/publisher/proxy-config/:endpointId/reconnect
+ *
+ * Wallet-signed token recovery. The publisher already paid the 1 USDC
+ * publishing fee when they called `registerEndpoint` on-chain — the
+ * endpoint is theirs forever. They should NEVER have to pay it again just
+ * because they lost their CLI tunnel token, pressed Delete from the
+ * dashboard, or swapped machines.
+ *
+ * This route creates (or updates) the off-chain proxy config for an
+ * endpoint the caller proves ownership of, and returns a fresh tunnel
+ * token. Free by design — the USDC fee gates registerEndpoint, not this.
+ *
+ * Message format:
+ *   `AgentGate reconnect endpoint\nendpointId: <id>\ntimestamp: <ts>`
+ */
+router.post("/proxy-config/:endpointId/reconnect", async (c) => {
+  const id = parseInt(c.req.param("endpointId"));
+  if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
+
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: "Invalid JSON body" }, 400); }
+  const { walletAddress, signature, timestamp } = body;
+  if (!walletAddress || !signature || !timestamp) {
+    return c.json({ error: "Missing required fields: walletAddress, signature, timestamp" }, 400);
+  }
+  if (Math.abs(Date.now() - Number(timestamp)) > 10 * 60 * 1000) {
+    return c.json({ error: "Signature timestamp expired (must be within 10 minutes)" }, 400);
+  }
+
+  const message = `AgentGate reconnect endpoint\nendpointId: ${id}\ntimestamp: ${timestamp}`;
+  let recovered: string;
+  try {
+    recovered = await recoverMessageAddress({ message, signature });
+  } catch (err: any) {
+    return c.json({ error: `Invalid signature: ${err.message}` }, 400);
+  }
+  if (recovered.toLowerCase() !== walletAddress.toLowerCase()) {
+    return c.json({ error: "Signature mismatch" }, 403);
+  }
+
+  // On-chain ownership check — the entire security story of this route.
+  let onChainRequireWorldId = false;
+  let onChainUrl = "";
+  try {
+    const client = createPublicClient({ chain: baseSepoliaChain, transport: http(BASE_SEPOLIA_RPC) });
+    const ep = await client.readContract({
+      address: REGISTRY, abi: REGISTRY_ABI,
+      functionName: "endpoints", args: [BigInt(id)],
+    }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
+    if (ep[1].toLowerCase() !== walletAddress.toLowerCase()) {
+      return c.json({ error: "Unauthorized: not the endpoint owner" }, 403);
+    }
+    onChainUrl = ep[2];
+    onChainRequireWorldId = ep[9];
+  } catch (err: any) {
+    return c.json({ error: `Could not verify ownership: ${err.message}` }, 500);
+  }
+
+  // Fresh token. Same format as the initial publish flow uses.
+  const newToken = "agt_" + randomBytes(24).toString("base64url").replace(/=+$/, "");
+
+  const existing = proxyStore.get(id);
+  if (existing) {
+    // Preserve whatever the publisher already configured (backend URL,
+    // headers, pricing, models) — we ONLY rotate the token so the CLI can
+    // re-authenticate. Publisher doesn't lose their settings.
+    proxyStore.set({ ...existing, tunnelToken: newToken });
+  } else {
+    // Minimal blank config — the CLI's set-tunnel call will fill in
+    // backendUrl/models/etc on first connect.
+    proxyStore.set({
+      endpointId: id,
+      publisherAddress: walletAddress.toLowerCase(),
+      backendUrl: "",
+      injectHeaders: {},
+      requireWorldId: onChainRequireWorldId,
+      maxConcurrent: DEFAULT_MAX_CONCURRENT,
+      paymentTimeoutSeconds: DEFAULT_PAYMENT_TIMEOUT_SECONDS,
+      contentType: DEFAULT_CONTENT_TYPE,
+      pricingModel: DEFAULT_PRICING_MODEL,
+      pricePerMillionTokens: DEFAULT_PRICE_PER_MILLION_TOKENS,
+      maxInputTokens: DEFAULT_MAX_INPUT_TOKENS,
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      name: onChainUrl
+        ? (() => { try { return new URL(onChainUrl).hostname; } catch { return `Endpoint #${id}`; } })()
+        : `Endpoint #${id}`,
+      tunnelToken: newToken,
+      registeredAt: Date.now(),
+    } as any);
+  }
+  // Bring it back into the Manage listing — the publisher is clearly
+  // intending to resume using this endpoint.
+  hiddenEndpoints.unhide(id, walletAddress.toLowerCase());
+
+  console.log(`[proxy-config] 🔑 Reconnect: issued fresh token for #${id} to ${walletAddress} (no fee charged — endpoint already paid for on-chain)`);
+  return c.json({
+    success: true,
+    endpointId: id,
+    tunnelToken: newToken,
+    message: `Fresh tunnel token issued. Run: AGENTGATE_TOKEN=${newToken} npx agentgate-cli tunnel`,
+  });
+});
+
 router.delete("/proxy-config/:endpointId", async (c) => {
   const id = parseInt(c.req.param("endpointId"));
   if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
@@ -810,14 +914,16 @@ router.delete("/proxy-config/:endpointId", async (c) => {
   // Delete is more than "hide": the proxy_config row is gone, so any call
   // to /api/proxy/id returns 404. We ALSO mark the endpoint as hidden so
   // it disappears from the publisher's Manage list and the public Dashboard.
-  // Re-publishing via POST /proxy-config un-hides it automatically.
+  // To resume: call POST /proxy-config/:id/reconnect with a wallet signature —
+  // it creates a fresh proxy config + tunnel token WITHOUT charging the
+  // 1 USDC publishing fee (already paid for the on-chain endpoint once).
   hiddenEndpoints.hide(id, walletAddress.toLowerCase());
   console.log(`[proxy-config] 🗑  Endpoint #${id} proxy deleted (and hidden) by ${walletAddress}`);
   return c.json({
     success: true,
     deleted: true,
     hidden: true,
-    message: `Proxy for endpoint #${id} deleted. The on-chain registry entry still exists but /api/proxy/${id} now returns 404. Re-publish from the form to bring it back.`,
+    message: `Proxy for endpoint #${id} deleted. On-chain endpoint untouched — use POST /proxy-config/${id}/reconnect (wallet-signed) to resume without paying the publishing fee again.`,
   });
 });
 
