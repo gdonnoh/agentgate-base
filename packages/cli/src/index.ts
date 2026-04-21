@@ -33,6 +33,75 @@ import * as path from "path";
 const SERVER_URL = process.env.AGENTGATE_SERVER || "https://agentgate-server.onrender.com";
 const OLLAMA_PORT = parseInt(process.env.OLLAMA_PORT || "11434", 10);
 
+// ── Hardware share planning ─────────────────────────────────────────────────
+// Publisher declares how much of their machine AgentGate is allowed to use.
+// Accepted inputs:
+//   AGENTGATE_SHARE=30    → 30%
+//   AGENTGATE_SHARE=0.3   → same (shortcut)
+//   AGENTGATE_SHARE=heavy → alias for 70
+// Default: 70 (balanced — most hobbyist publishers are fine giving most of
+// the box when no one else is actively using it, since Ollama only pulls
+// resources when a request is in flight).
+const SHARE_PRESETS: Record<string, number> = {
+  light: 30, balanced: 50, heavy: 70, max: 100,
+};
+
+function readSharePct(): number {
+  const raw = (process.env.AGENTGATE_SHARE || "70").toLowerCase().trim();
+  if (raw in SHARE_PRESETS) return SHARE_PRESETS[raw];
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 70;
+  // Accept both 0.3 and 30 for 30%.
+  const pct = n <= 1 ? n * 100 : n;
+  return Math.max(5, Math.min(100, Math.round(pct)));
+}
+
+interface HardwarePlan {
+  sharePct: number;
+  cores: number;
+  totalMemGB: number;
+  platform: string;
+  arch: string;
+  isAppleSilicon: boolean;
+  plannedParallel: number;
+  plannedThreads: number;
+  currentParallel: number;
+  plannedIsActive: boolean;
+}
+
+function planHardwareShare(): HardwarePlan {
+  const sharePct = readSharePct();
+  const cores = os.cpus().length;
+  const totalMemGB = Math.max(1, Math.round(os.totalmem() / (1024 ** 3)));
+  const platform = os.platform();
+  const arch = os.arch();
+  const isAppleSilicon = platform === "darwin" && arch === "arm64";
+
+  // Threads: a linear fraction of available cores.
+  const plannedThreads = Math.max(1, Math.floor((cores * sharePct) / 100));
+
+  // Parallel slots: each slot wants ~3GB breathing room on consumer hardware
+  // (model weights + KV cache overhead). Apple Silicon unified memory means
+  // all RAM counts as effective VRAM, so we can be a touch more generous.
+  const memBudgetGB = (totalMemGB * sharePct) / 100;
+  const perSlotGB   = isAppleSilicon ? 2.5 : 3.5;
+  const plannedParallel = Math.max(
+    1,
+    Math.min(8, Math.floor(memBudgetGB / perSlotGB)),
+  );
+
+  const currentParallel = Math.max(
+    1,
+    parseInt(process.env.OLLAMA_NUM_PARALLEL || "1", 10) || 1,
+  );
+  const plannedIsActive = currentParallel === plannedParallel;
+
+  return {
+    sharePct, cores, totalMemGB, platform, arch, isAppleSilicon,
+    plannedParallel, plannedThreads, currentParallel, plannedIsActive,
+  };
+}
+
 // ── Token persistence (R2-E / R2-F) ─────────────────────────────────────────
 // Stored outside the repo at ~/.agentgate/token with mode 0600 so other
 // users on the machine can't read it. Written only after a successful
@@ -199,15 +268,13 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
     const maxInputTokens  = Math.floor(contextLength * 0.6);
     const maxOutputTokens = Math.floor(contextLength * 0.4);
 
-    // Read the publisher's Ollama parallelism setting from the env. Ollama
-    // serialises inference by default (NUM_PARALLEL=1) — when the publisher
-    // opts into batch inference (`OLLAMA_NUM_PARALLEL=4 ollama serve`) the
-    // GPU shares KV-cache across slots and we can honestly promise that
-    // much concurrency to buyers. Cap at 8 to stay sane on consumer GPUs.
-    const ollamaParallel = Math.max(
-      1,
-      Math.min(8, parseInt(process.env.OLLAMA_NUM_PARALLEL || "1", 10) || 1),
-    );
+    // True concurrency cap for the endpoint is the MIN of:
+    //   - what Ollama is actually willing to batch (OLLAMA_NUM_PARALLEL)
+    //   - what the hardware share plan says the box can support
+    // This prevents promising 4 parallel slots to buyers when Ollama is
+    // actually serialising (NUM_PARALLEL=1) — buyers would just queue up.
+    const hw = planHardwareShare();
+    const effectiveParallel = Math.min(hw.currentParallel, hw.plannedParallel);
 
     return {
       contentType: "api",
@@ -219,7 +286,7 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
       maxInputTokens,
       maxOutputTokens,
       pricePerMillionTokens: guessPricePerMillionTokens(firstModel),
-      maxConcurrent: ollamaParallel,
+      maxConcurrent: effectiveParallel,
       paymentTimeoutSeconds: 60,
     };
   } catch {
@@ -299,15 +366,30 @@ async function runTunnel(token: string) {
   // defaults just stay in effect.
   const detected = await detectOllamaConfig();
   if (detected) {
-    const parallelHint = detected.maxConcurrent === 1
-      ? "\n     💡 Tip: run \x1b[1mOLLAMA_NUM_PARALLEL=4 ollama serve\x1b[0m for true multi-user concurrency,\n        then restart this CLI so maxConcurrent updates on the endpoint."
-      : "";
+    const hw = planHardwareShare();
+    const hwLine =
+      `${hw.cores} cores · ${hw.totalMemGB}GB RAM` +
+      (hw.isAppleSilicon ? " · Apple Silicon (UMA)" : "") +
+      ` · ${hw.platform}/${hw.arch}`;
+
+    // Only nag the publisher when Ollama's actual NUM_PARALLEL is below
+    // what the hardware plan could support. If the planner itself decided 1
+    // slot (tiny machine) there's nothing to unlock and we stay quiet.
+    const underProvisioned = hw.currentParallel < hw.plannedParallel;
+    const ollamaCmd = `OLLAMA_NUM_PARALLEL=${hw.plannedParallel} OLLAMA_NUM_THREAD=${hw.plannedThreads} ollama serve`;
+
     console.log(`
-  🧠 Auto-detected settings:
+  💻 System
+     Hardware:    ${hwLine}
+     Share level: ${hw.sharePct}% (AGENTGATE_SHARE — set light/balanced/heavy/max or 1-100)
+     Plan:        ${hw.plannedParallel} parallel slot${hw.plannedParallel === 1 ? "" : "s"} · ${hw.plannedThreads} threads
+     Ollama now:  NUM_PARALLEL=${hw.currentParallel}${underProvisioned ? " \x1b[33m(under-provisioned)\x1b[0m" : " \x1b[32m✓\x1b[0m"}
+
+  🧠 Endpoint
      Model:       ${detected.model}
      Context:     ${detected.contextLength.toLocaleString()} tokens  → input cap ${detected.maxInputTokens.toLocaleString()}, output cap ${detected.maxOutputTokens.toLocaleString()}
      Pricing:     $${detected.pricePerMillionTokens.toFixed(2)} / 1M tokens
-     Concurrency: ${detected.maxConcurrent} parallel request${detected.maxConcurrent === 1 ? "" : "s"} (from OLLAMA_NUM_PARALLEL)${parallelHint}
+     Capacity:    ${detected.maxConcurrent} concurrent buyer${detected.maxConcurrent === 1 ? "" : "s"}${underProvisioned ? `\n     💡 To unlock ${hw.plannedParallel} slots restart Ollama:\n        \x1b[1m${ollamaCmd}\x1b[0m\n        then re-run this CLI.` : ""}
 `);
   } else {
     log("ℹ️ ", "Could not auto-detect Ollama model info — dashboard defaults will be used.");
