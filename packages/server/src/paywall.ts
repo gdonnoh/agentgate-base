@@ -905,19 +905,34 @@ export function paywallHtml(opts: PaywallOptions): string {
 
       try {
         const base = PROXY_URL.endsWith("/") ? PROXY_URL.slice(0, -1) : PROXY_URL;
-        const res = await fetch(base + "/api/chat", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "accept": "application/json",
-            "x-agentgate-session": data.sessionToken,
-          },
-          body: JSON.stringify({
-            model: selectedModel,
-            messages: messagesState,
-            stream: false,
-          }),
+        const reqBody = JSON.stringify({
+          model: selectedModel,
+          messages: messagesState,
+          stream: false,
         });
+        const reqHeaders = {
+          "content-type": "application/json",
+          "accept": "application/json",
+          "x-agentgate-session": data.sessionToken,
+        };
+
+        // Auto-retry on 429 "Endpoint at capacity" — this happens when another
+        // tab / agent is mid-inference on a maxConcurrent=1 Ollama endpoint.
+        // The server honours Retry-After; we surface a "waiting in queue" state
+        // and retry silently up to MAX_RETRIES before giving up.
+        const MAX_RETRIES = 10;
+        let res;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          res = await fetch(base + "/api/chat", {
+            method: "POST", headers: reqHeaders, body: reqBody,
+          });
+          if (res.status !== 429) break;
+          if (attempt === MAX_RETRIES) break;
+          const retryAfter = Math.max(1, Number(res.headers.get("retry-after")) || 3);
+          typingEl.textContent = "in queue (backend busy), retrying in " + retryAfter + "s…";
+          await new Promise(function (r) { setTimeout(r, retryAfter * 1000); });
+          typingEl.textContent = "typing…";
+        }
 
         // Update counter from response headers (works on success or 402).
         const hMicro = res.headers.get("x-session-remaining-micro-usdc");
