@@ -28,6 +28,7 @@ import { randomUUID } from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as readline from "readline";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 const SERVER_URL = process.env.AGENTGATE_SERVER || "https://agentgate-server.onrender.com";
@@ -46,11 +47,11 @@ const SHARE_PRESETS: Record<string, number> = {
   light: 30, balanced: 50, heavy: 70, max: 100,
 };
 
-function readSharePct(): number {
-  const raw = (process.env.AGENTGATE_SHARE || "70").toLowerCase().trim();
-  if (raw in SHARE_PRESETS) return SHARE_PRESETS[raw];
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return 70;
+function parseSharePct(raw: string): number | null {
+  const s = raw.toLowerCase().trim();
+  if (s in SHARE_PRESETS) return SHARE_PRESETS[s];
+  const n = Number(s);
+  if (!Number.isFinite(n) || n <= 0) return null;
   // Accept both 0.3 and 30 for 30%.
   const pct = n <= 1 ? n * 100 : n;
   return Math.max(5, Math.min(100, Math.round(pct)));
@@ -69,8 +70,7 @@ interface HardwarePlan {
   plannedIsActive: boolean;
 }
 
-function planHardwareShare(): HardwarePlan {
-  const sharePct = readSharePct();
+function planHardwareShare(sharePct: number): HardwarePlan {
   const cores = os.cpus().length;
   const totalMemGB = Math.max(1, Math.round(os.totalmem() / (1024 ** 3)));
   const platform = os.platform();
@@ -126,6 +126,71 @@ function writePersistedToken(token: string) {
   } catch (err: any) {
     console.warn(`  ⚠  Could not persist rotated token to ${TOKEN_FILE}: ${err.message}`);
   }
+}
+
+// ── Share preference persistence ────────────────────────────────────────────
+// First-run prompt lets the publisher pick how much of their box they want
+// AgentGate to use. Saved to ~/.agentgate/share so subsequent runs don't
+// re-ask. Env var AGENTGATE_SHARE always wins over the persisted file (easy
+// override for CI, one-off experiments, or scripts).
+const SHARE_FILE = path.join(TOKEN_DIR, "share");
+
+function readPersistedShare(): number | null {
+  try {
+    if (!fs.existsSync(SHARE_FILE)) return null;
+    return parseSharePct(fs.readFileSync(SHARE_FILE, "utf-8"));
+  } catch { return null; }
+}
+
+function writePersistedShare(pct: number) {
+  try {
+    fs.mkdirSync(TOKEN_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(SHARE_FILE, String(pct));
+  } catch { /* non-fatal — we'll re-prompt next time */ }
+}
+
+async function promptSharePct(): Promise<number> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    console.log(`
+  🎛  First run — how much of your machine should AgentGate use?
+
+     \x1b[1m1)\x1b[0m Light     — 30%   barely noticeable, share casually
+     \x1b[1m2)\x1b[0m Balanced  — 50%   share while you work
+     \x1b[1m3)\x1b[0m Heavy     — 70%   \x1b[2m(default)\x1b[0m dedicated-ish hosting
+     \x1b[1m4)\x1b[0m Max       — 100%  all yours
+`);
+    rl.question("  > Choose [1-4, Enter = 3]: ", (answer) => {
+      rl.close();
+      const n = answer.trim();
+      const pct = n === "1" ? 30 : n === "2" ? 50 : n === "4" ? 100 : 70;
+      console.log(`  ✓ Saved — \x1b[1m${pct}%\x1b[0m (change later via \x1b[1mAGENTGATE_SHARE=\x1b[0m env or edit ${SHARE_FILE})\n`);
+      resolve(pct);
+    });
+  });
+}
+
+/**
+ * Resolve the share-of-machine percentage. Precedence:
+ *   1. AGENTGATE_SHARE env var (explicit, always wins)
+ *   2. Persisted ~/.agentgate/share file (set on first interactive run)
+ *   3. Interactive prompt when stdin is a TTY (and persists for next time)
+ *   4. Default 70% (non-TTY / CI fallback)
+ */
+async function resolveSharePct(): Promise<number> {
+  const envRaw = process.env.AGENTGATE_SHARE;
+  if (envRaw) {
+    const parsed = parseSharePct(envRaw);
+    if (parsed !== null) return parsed;
+  }
+  const persisted = readPersistedShare();
+  if (persisted !== null) return persisted;
+  if (process.stdin.isTTY) {
+    const chosen = await promptSharePct();
+    writePersistedShare(chosen);
+    return chosen;
+  }
+  return 70;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -233,7 +298,7 @@ function guessPricePerMillionTokens(modelName: string): number {
   return 0.5;
 }
 
-async function detectOllamaConfig(): Promise<DetectedConfig | null> {
+async function detectOllamaConfig(hw: HardwarePlan): Promise<DetectedConfig | null> {
   try {
     const tagsRes = await fetch(`http://localhost:${OLLAMA_PORT}/api/tags`, {
       signal: AbortSignal.timeout(3000),
@@ -273,7 +338,6 @@ async function detectOllamaConfig(): Promise<DetectedConfig | null> {
     //   - what the hardware share plan says the box can support
     // This prevents promising 4 parallel slots to buyers when Ollama is
     // actually serialising (NUM_PARALLEL=1) — buyers would just queue up.
-    const hw = planHardwareShare();
     const effectiveParallel = Math.min(hw.currentParallel, hw.plannedParallel);
 
     return {
@@ -360,13 +424,18 @@ async function runTunnel(token: string) {
   }
   log("✅", `Ollama running — ${models.length} model${models.length > 1 ? "s" : ""}: ${models.join(", ")}`);
 
+  // Step 1a: Resolve share preference (interactive prompt on first run,
+  // persisted to ~/.agentgate/share for subsequent runs). AGENTGATE_SHARE
+  // env var overrides the persisted file for easy one-off tweaks.
+  const sharePct = await resolveSharePct();
+  const hw = planHardwareShare(sharePct);
+
   // Step 1b: Auto-detect advanced settings from /api/show so the publisher
   // never has to fill pricing/max_tokens/concurrency/timeout by hand.
   // Failure here is non-fatal — we still register the tunnel, the dashboard
   // defaults just stay in effect.
-  const detected = await detectOllamaConfig();
+  const detected = await detectOllamaConfig(hw);
   if (detected) {
-    const hw = planHardwareShare();
     const hwLine =
       `${hw.cores} cores · ${hw.totalMemGB}GB RAM` +
       (hw.isAppleSilicon ? " · Apple Silicon (UMA)" : "") +
