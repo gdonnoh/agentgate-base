@@ -244,6 +244,73 @@ async function checkOllama(): Promise<string[]> {
   }
 }
 
+function checkOllamaBinary(): boolean {
+  try {
+    execSync("which ollama", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Spawn `ollama serve` as a child process with the NUM_PARALLEL / NUM_THREAD
+ * the hardware planner picked, and wait until /api/tags responds. Ollama
+ * reads its own tuning env on startup, so this is the only reliable way to
+ * apply OLLAMA_NUM_PARALLEL without asking the publisher to type it. The
+ * returned ChildProcess is kept alive by the caller and killed on Ctrl+C.
+ *
+ * Skip if an Ollama is already listening — we don't want to stomp on an
+ * existing session that might be shared with other apps. Callers handle
+ * the "already running but with NUM_PARALLEL=1" case separately.
+ */
+async function spawnOllamaIfNeeded(plan: HardwarePlan): Promise<ChildProcess | null> {
+  // Is something already listening? If yes, leave it.
+  const existing = await checkOllama();
+  if (existing.length > 0) return null;
+
+  if (!checkOllamaBinary()) {
+    fatal(
+      `Ollama is not running and not installed.\n` +
+      `     Install it from: https://ollama.com/download\n` +
+      `     Then re-run this CLI — we'll start it for you.`
+    );
+  }
+
+  log("🚀", `Starting ollama serve with NUM_PARALLEL=${plan.plannedParallel}, NUM_THREAD=${plan.plannedThreads}...`);
+
+  const child = spawn("ollama", ["serve"], {
+    env: {
+      ...process.env,
+      OLLAMA_NUM_PARALLEL: String(plan.plannedParallel),
+      OLLAMA_NUM_THREAD:   String(plan.plannedThreads),
+      // Don't override MAX_LOADED_MODELS / HOST — publisher's env wins.
+    },
+    stdio: ["ignore", "ignore", "pipe"], // drop stdout, capture stderr for errors
+  });
+
+  child.on("error", (err) => {
+    fatal(`Failed to launch Ollama: ${(err as any).message || String(err)}`);
+  });
+
+  // Poll /api/tags until Ollama is ready (up to 30s — first launch can be
+  // slow because Ollama scans model blobs on startup).
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const models = await checkOllama();
+    if (models.length > 0) {
+      log("✅", `Ollama up — ${models.length} model${models.length > 1 ? "s" : ""}`);
+      return child;
+    }
+    if (child.exitCode !== null) {
+      fatal(`Ollama exited early (code ${child.exitCode}) during startup.`);
+    }
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  try { child.kill("SIGTERM"); } catch { /* ignore */ }
+  fatal("Ollama didn't become ready within 30s. Try starting it manually first.");
+}
+
 // ── Auto-detection (Option A) ───────────────────────────────────────────────
 // Publishers shouldn't have to fill in max_tokens / concurrency / pricing /
 // timeout on the dashboard when the local Ollama install already knows its
@@ -412,8 +479,18 @@ async function setTunnelUrl(
 async function runTunnel(token: string) {
   printBanner();
 
-  // Step 1: Check Ollama
+  // Step 1a: Resolve share preference FIRST (interactive prompt on first run,
+  // persisted to ~/.agentgate/share for subsequent runs). We need the plan
+  // BEFORE checking Ollama so we can launch it with the right NUM_PARALLEL
+  // when it isn't running yet. AGENTGATE_SHARE env var overrides.
+  const sharePct = await resolveSharePct();
+  const hw = planHardwareShare(sharePct);
+
+  // Step 1b: Check Ollama. If it's running, use it. If it isn't, we spawn
+  // it ourselves with the planner's NUM_PARALLEL — no "please restart with
+  // OLLAMA_NUM_PARALLEL=X" dance for the publisher.
   log("🔍", "Checking Ollama...");
+  const ollamaChild = await spawnOllamaIfNeeded(hw);
   const models = await checkOllama();
   if (models.length === 0) {
     fatal(
@@ -422,43 +499,40 @@ async function runTunnel(token: string) {
       `     Or install from: https://ollama.com/download`
     );
   }
-  log("✅", `Ollama running — ${models.length} model${models.length > 1 ? "s" : ""}: ${models.join(", ")}`);
-
-  // Step 1a: Resolve share preference (interactive prompt on first run,
-  // persisted to ~/.agentgate/share for subsequent runs). AGENTGATE_SHARE
-  // env var overrides the persisted file for easy one-off tweaks.
-  const sharePct = await resolveSharePct();
-  const hw = planHardwareShare(sharePct);
+  log("✅", `Ollama ${ollamaChild ? "managed by CLI" : "already running"} — ${models.length} model${models.length > 1 ? "s" : ""}: ${models.join(", ")}`);
+  // If we started Ollama ourselves, reflect that in OUR env so the hw plan's
+  // `currentParallel` matches reality (no spurious "under-provisioned" warn).
+  if (ollamaChild) {
+    process.env.OLLAMA_NUM_PARALLEL = String(hw.plannedParallel);
+  }
+  const hwFinal = planHardwareShare(sharePct);
 
   // Step 1b: Auto-detect advanced settings from /api/show so the publisher
   // never has to fill pricing/max_tokens/concurrency/timeout by hand.
   // Failure here is non-fatal — we still register the tunnel, the dashboard
   // defaults just stay in effect.
-  const detected = await detectOllamaConfig(hw);
+  const detected = await detectOllamaConfig(hwFinal);
   if (detected) {
     const hwLine =
-      `${hw.cores} cores · ${hw.totalMemGB}GB RAM` +
-      (hw.isAppleSilicon ? " · Apple Silicon (UMA)" : "") +
-      ` · ${hw.platform}/${hw.arch}`;
+      `${hwFinal.cores} cores · ${hwFinal.totalMemGB}GB RAM` +
+      (hwFinal.isAppleSilicon ? " · Apple Silicon (UMA)" : "") +
+      ` · ${hwFinal.platform}/${hwFinal.arch}`;
 
-    // Only nag the publisher when Ollama's actual NUM_PARALLEL is below
-    // what the hardware plan could support. If the planner itself decided 1
-    // slot (tiny machine) there's nothing to unlock and we stay quiet.
-    const underProvisioned = hw.currentParallel < hw.plannedParallel;
-    const ollamaCmd = `OLLAMA_NUM_PARALLEL=${hw.plannedParallel} OLLAMA_NUM_THREAD=${hw.plannedThreads} ollama serve`;
+    const underProvisioned = hwFinal.currentParallel < hwFinal.plannedParallel;
+    const ollamaCmd = `OLLAMA_NUM_PARALLEL=${hwFinal.plannedParallel} OLLAMA_NUM_THREAD=${hwFinal.plannedThreads} ollama serve`;
 
     console.log(`
   💻 System
      Hardware:    ${hwLine}
-     Share level: ${hw.sharePct}% (AGENTGATE_SHARE — set light/balanced/heavy/max or 1-100)
-     Plan:        ${hw.plannedParallel} parallel slot${hw.plannedParallel === 1 ? "" : "s"} · ${hw.plannedThreads} threads
-     Ollama now:  NUM_PARALLEL=${hw.currentParallel}${underProvisioned ? " \x1b[33m(under-provisioned)\x1b[0m" : " \x1b[32m✓\x1b[0m"}
+     Share level: ${hwFinal.sharePct}% (AGENTGATE_SHARE — set light/balanced/heavy/max or 1-100)
+     Plan:        ${hwFinal.plannedParallel} parallel slot${hwFinal.plannedParallel === 1 ? "" : "s"} · ${hwFinal.plannedThreads} threads
+     Ollama now:  NUM_PARALLEL=${hwFinal.currentParallel}${underProvisioned ? " \x1b[33m(under-provisioned — Ollama was already running with a lower cap)\x1b[0m" : ` \x1b[32m✓${ollamaChild ? " (managed by CLI)" : ""}\x1b[0m`}
 
   🧠 Endpoint
      Model:       ${detected.model}
      Context:     ${detected.contextLength.toLocaleString()} tokens  → input cap ${detected.maxInputTokens.toLocaleString()}, output cap ${detected.maxOutputTokens.toLocaleString()}
      Pricing:     $${detected.pricePerMillionTokens.toFixed(2)} / 1M tokens
-     Capacity:    ${detected.maxConcurrent} concurrent buyer${detected.maxConcurrent === 1 ? "" : "s"}${underProvisioned ? `\n     💡 To unlock ${hw.plannedParallel} slots restart Ollama:\n        \x1b[1m${ollamaCmd}\x1b[0m\n        then re-run this CLI.` : ""}
+     Capacity:    ${detected.maxConcurrent} concurrent buyer${detected.maxConcurrent === 1 ? "" : "s"}${underProvisioned ? `\n     💡 Ollama is already running with a lower cap. Stop it (Ctrl+C in its window)\n        and re-run this CLI — we'll start Ollama with:\n        \x1b[1m${ollamaCmd}\x1b[0m` : ""}
 `);
   } else {
     log("ℹ️ ", "Could not auto-detect Ollama model info — dashboard defaults will be used.");
@@ -487,11 +561,17 @@ async function runTunnel(token: string) {
 
   let tunnelUrl: string | null = null;
 
-  // Handle cleanup on SIGINT/SIGTERM
+  // Handle cleanup on SIGINT/SIGTERM. If we spawned Ollama ourselves, also
+  // stop it — we don't want to leave a stray ollama serve behind that
+  // could confuse the publisher on the next run.
   const cleanup = () => {
     console.log("\n");
     log("🛑", "Shutting down tunnel...");
-    cfProcess.kill("SIGTERM");
+    try { cfProcess.kill("SIGTERM"); } catch { /* ignore */ }
+    if (ollamaChild) {
+      log("🛑", "Stopping Ollama (CLI-managed)...");
+      try { ollamaChild.kill("SIGTERM"); } catch { /* ignore */ }
+    }
     setTimeout(() => process.exit(0), 1000);
   };
   process.on("SIGINT", cleanup);
