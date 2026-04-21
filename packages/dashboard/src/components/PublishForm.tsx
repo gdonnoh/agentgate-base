@@ -248,7 +248,10 @@ export function PublishForm() {
       const endpointId = overviewJson.registry.endpointCount;
       const endpointName = endpointNameFromUrl();
 
-      const priceNum = parseDecimalInput(price);
+      // In per-token mode priceNum is derived from the per-token config so
+      // the on-chain pricePerCall matches the max budget the server will
+      // quote on the 402. Otherwise we trust the field.
+      const priceNum = isPerTokenMode ? perTokenMaxUsd : parseDecimalInput(price);
       if (!Number.isFinite(priceNum) || priceNum < 0) {
         throw new Error("Invalid price — use a decimal number (e.g. 0.03)");
       }
@@ -445,6 +448,15 @@ export function PublishForm() {
   const urlEmpty     = !backendUrl.trim();
   const canPublish   = (testResult?.ok || urlEmpty) && !publishing && !publishResult;
   const gasDepositNum = parseDecimalInput(gasDeposit);
+
+  // ── Effective price resolution ─────────────────────────────────────────
+  // Per-token endpoints derive the on-chain pricePerCall from their token
+  // budget × rate-per-million, so the "Price per call" input at the top of
+  // the form becomes a DERIVED display — editing it would be a lie to the
+  // user because the server ignores it and computes from per-token config.
+  // Per-call and webpage endpoints use whatever the user typed.
+  const isPerTokenMode = contentType === "api" && pricingModel === "per-token";
+  const perTokenMaxUsd = (((maxInputTokens || 0) + (maxOutputTokens || 0)) / 1_000_000) * (pricePerMillionTokens || 0);
   // 0% sponsorship => no point depositing ETH (the paymaster covers nothing).
   const hasDeposit    = Number.isFinite(gasDepositNum) && gasDepositNum > 0 && gasSharePct > 0;
 
@@ -541,19 +553,47 @@ export function PublishForm() {
 
       {/* ── Simple price input (always visible) ── */}
       <div className="flex flex-col gap-1.5">
-        <label className="label">Price per call</label>
+        <label className="label">
+          {isPerTokenMode ? "Max per-call budget" : "Price per call"}
+        </label>
         <div className="flex items-center gap-2">
           <span className="text-text-muted text-lg">$</span>
-          <input
-            type="number"
-            min="0"
-            step="0.001"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-            className="input w-28 text-center font-mono"
-          />
-          <span className="text-sm text-text-muted font-sans">USDC per call</span>
+          {isPerTokenMode ? (
+            <>
+              <input
+                type="text"
+                readOnly
+                value={perTokenMaxUsd.toFixed(6)}
+                className="input w-36 text-center font-mono bg-bg border-border text-text-muted cursor-not-allowed"
+                title="Auto-computed from per-token settings — change them in Advanced"
+              />
+              <span className="text-sm text-text-muted font-sans">USDC (max per call)</span>
+            </>
+          ) : (
+            <>
+              <input
+                type="number"
+                min="0"
+                step="0.001"
+                value={price}
+                onChange={(e) => setPrice(e.target.value)}
+                className="input w-28 text-center font-mono"
+              />
+              <span className="text-sm text-text-muted font-sans">USDC per call</span>
+            </>
+          )}
         </div>
+        {isPerTokenMode && (
+          <p className="text-[11px] text-text-muted font-sans">
+            Per-token pricing: buyer is billed for actual tokens used. This is the cap.
+            Change <code className="font-mono text-text-dim">max tokens × rate/1M</code> in
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(true)}
+              className="text-accent hover:underline mx-1"
+            >Advanced</button>.
+          </p>
+        )}
       </div>
 
       {/* ── Advanced settings toggle ── */}
