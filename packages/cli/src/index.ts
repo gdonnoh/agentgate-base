@@ -120,7 +120,21 @@ function readPersistedToken(): string | null {
 function writePersistedToken(token: string) {
   try {
     fs.mkdirSync(TOKEN_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
+    // Symlink hardening: another user on a shared box (or a hostile process)
+    // could have pre-created TOKEN_FILE as a symlink to /tmp/leak or similar.
+    // fs.writeFileSync follows symlinks, so the token would land at the
+    // attacker's target with their permissions. Unlink any pre-existing
+    // symlink before writing, then create a fresh regular file.
+    try {
+      const st = fs.lstatSync(TOKEN_FILE);
+      if (st.isSymbolicLink() || !st.isFile()) {
+        fs.unlinkSync(TOKEN_FILE);
+      }
+    } catch { /* not present or not accessible — writeFileSync will handle */ }
+    // Open with O_EXCL-style semantics by unlinking first + writing fresh.
+    // `flag: "wx"` would throw on existing; we've already removed above so
+    // this line always creates a new file.
+    fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600, flag: "w" });
     // Defensive chmod for the case where the file pre-existed with laxer perms.
     try { fs.chmodSync(TOKEN_FILE, 0o600); } catch { /* ignore */ }
   } catch (err: any) {

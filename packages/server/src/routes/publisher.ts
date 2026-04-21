@@ -786,6 +786,22 @@ router.post("/proxy-config", async (c) => {
  * Message format:
  *   `AgentGate reconnect endpoint\nendpointId: <id>\ntimestamp: <ts>`
  */
+// Reconnect signature replay ring — an observer who captures a reconnect
+// request body can replay it multiple times within the 10-minute signature
+// window, rotating the publisher's token each time and locking them out.
+// We remember the last 500 (id, timestamp, signature-prefix) tuples and
+// reject exact replays. Memory-only: cleared on restart (acceptable, a new
+// process starts with empty history but nonces are timestamp-gated so
+// replays past the 10-min window die naturally).
+const reconnectNonceRing: string[] = [];
+const RECONNECT_NONCE_CAP = 500;
+function rememberReconnectNonce(key: string): boolean {
+  if (reconnectNonceRing.includes(key)) return false;
+  reconnectNonceRing.push(key);
+  if (reconnectNonceRing.length > RECONNECT_NONCE_CAP) reconnectNonceRing.shift();
+  return true;
+}
+
 router.post("/proxy-config/:endpointId/reconnect", async (c) => {
   const id = parseInt(c.req.param("endpointId"));
   if (isNaN(id)) return c.json({ error: "Invalid endpointId" }, 400);
@@ -798,6 +814,14 @@ router.post("/proxy-config/:endpointId/reconnect", async (c) => {
   }
   if (Math.abs(Date.now() - Number(timestamp)) > 10 * 60 * 1000) {
     return c.json({ error: "Signature timestamp expired (must be within 10 minutes)" }, 400);
+  }
+
+  // Anti-replay — the (id, timestamp, signature) tuple is single-use. Without
+  // this an attacker who captures the request body can replay it up to the
+  // 10-minute cap and keep rotating the token on the publisher.
+  const nonceKey = `${id}:${timestamp}:${String(signature).slice(0, 32)}`;
+  if (!rememberReconnectNonce(nonceKey)) {
+    return c.json({ error: "Signature already used (replay rejected)" }, 403);
   }
 
   const message = `AgentGate reconnect endpoint\nendpointId: ${id}\ntimestamp: ${timestamp}`;
@@ -822,6 +846,13 @@ router.post("/proxy-config/:endpointId/reconnect", async (c) => {
     }) as readonly [bigint, `0x${string}`, string, bigint, `0x${string}`, boolean, bigint, bigint, bigint, boolean];
     if (ep[1].toLowerCase() !== walletAddress.toLowerCase()) {
       return c.json({ error: "Unauthorized: not the endpoint owner" }, 403);
+    }
+    // Refuse to issue a fresh tunnel token for a deactivated endpoint. An
+    // endpoint whose on-chain `active` flag is false has been intentionally
+    // taken offline by the publisher (or governance); recover-via-signature
+    // shouldn't resurrect it. The publisher can flip active back on first.
+    if (!ep[5]) {
+      return c.json({ error: "Endpoint is not active on-chain — cannot reconnect" }, 403);
     }
     onChainUrl = ep[2];
     onChainRequireWorldId = ep[9];

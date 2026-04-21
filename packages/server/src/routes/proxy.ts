@@ -41,18 +41,35 @@ import { paywallHtml } from "../paywall";
 //      with no explicit secret still have a stable key across restarts.
 // We warn once at startup if the env var is missing so operators notice.
 const _envSessionSecret = process.env.SESSION_SECRET;
+const _isProduction = process.env.NODE_ENV === "production";
+
+// In production we REFUSE to run without SESSION_SECRET: the previous
+// fallback derived from PRIVATE_KEY, which means any leak of the deployer
+// key (logs, env dumps, GitHub Actions) is simultaneously a forge-any-session
+// primitive. That's too big a blast radius. Dev still has a deterministic
+// fallback so local test runs don't need the env var.
+if (_isProduction && (!_envSessionSecret || _envSessionSecret.length < 16)) {
+  console.error(
+    "[proxy] ❌  SESSION_SECRET must be set to a ≥16-char random value in production. " +
+    "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+  );
+  // Fail fast — don't let the server boot with a weak / derivable secret.
+  process.exit(1);
+}
+
 let _sessionSecretWarned = false;
 function getSessionSecret(): string {
   if (_envSessionSecret && _envSessionSecret.length > 0) return _envSessionSecret;
   if (!_sessionSecretWarned) {
     _sessionSecretWarned = true;
     console.warn(
-      "[proxy] ⚠  SESSION_SECRET not set — deriving from PRIVATE_KEY. " +
-      "Set SESSION_SECRET explicitly in production for rotation safety."
+      "[proxy] ⚠  SESSION_SECRET not set — dev-only fallback in use. " +
+      "Production boot would refuse this — set SESSION_SECRET before deploying."
     );
   }
+  // Dev fallback ONLY — not the production path.
   return createHash("sha256")
-    .update("agentgate-session-" + (process.env.PRIVATE_KEY || ""))
+    .update("agentgate-session-dev-" + (process.env.PRIVATE_KEY || "missing"))
     .digest("hex");
 }
 
@@ -1282,20 +1299,41 @@ async function handleSessionedRequest(
 
   if (session.pricingModel === "per-token") {
     let costMicroUsd = 0n;
+    let parseFailed = false;
+    let usageMissing = false;
     try {
       const d = JSON.parse(bodyText);
       const input  = Number(d?.prompt_eval_count) || 0;
       const output = Number(d?.eval_count) || 0;
-      const rate = proxyConfig.pricePerMillionTokens ?? DEFAULT_PRICE_PER_MILLION_TOKENS;
-      // micro-USDC = tokens * (rate_usd_per_million * 1_000_000_micro_usdc_per_usdc) / 1_000_000_tokens
-      //            = tokens * rate
-      // i.e. per-million-tokens rate in USD converts 1:1 to per-million-tokens in micro-USD.
-      const microCost = Math.ceil((input + output) * rate);
-      costMicroUsd = BigInt(microCost);
+      if (input === 0 && output === 0) {
+        // Upstream responded with JSON but didn't report usage (e.g. streaming
+        // partial, OpenAI-compat without usage object, or a misconfigured
+        // backend). We can't bill honestly — refuse the response rather than
+        // give the buyer a free answer.
+        usageMissing = true;
+      } else {
+        const rate = proxyConfig.pricePerMillionTokens ?? DEFAULT_PRICE_PER_MILLION_TOKENS;
+        // micro-USDC = tokens * (rate_usd_per_million * 1_000_000_micro_usdc_per_usdc) / 1_000_000_tokens
+        //            = tokens * rate
+        // i.e. per-million-tokens rate in USD converts 1:1 to per-million-tokens in micro-USD.
+        const microCost = Math.ceil((input + output) * rate);
+        costMicroUsd = BigInt(microCost);
+      }
     } catch {
-      // Non-JSON upstream — we can't meter. Fail closed: charge 0 (best for buyer)
-      // and log so ops can notice. Session still counts down on expiry.
-      console.warn(`[proxy] sessioned #${endpointId}: non-JSON upstream, charged 0`);
+      parseFailed = true;
+    }
+
+    // Fail closed: if we can't bill (parse failed OR usage missing) we don't
+    // serve free responses. Previously we logged and returned the body with
+    // a 0 charge — that let a malicious upstream deliver unlimited free
+    // inference by returning non-JSON, which also hid genuine backend bugs
+    // behind "free chat" UX for buyers.
+    if (parseFailed || usageMissing) {
+      console.warn(`[proxy] sessioned #${endpointId}: ${parseFailed ? "non-JSON upstream" : "usage missing from upstream JSON"} — returning 502 (buyer not charged)`);
+      return c.json({
+        error: "Upstream did not report token usage, cannot bill this call. Retry or contact the publisher.",
+        status: "usage_missing",
+      }, 502);
     }
 
     if (costMicroUsd > 0n) {
